@@ -41,8 +41,10 @@ Pad 未接听时成功；unlock 只在远程已接听时允许，默认 1 秒冷
   在门口机与 Pad 相距很远时，验证我们分析的协议、以及 Agent/后端的正确性。
 - `door_station`：可交互的软件门口机。用保存的抓包帧/音频当门口摄像头和麦克风（呼叫
   期间按 `loop_fps` 循环），从 stdin 控制台 ring/hangup，claim/unlock/hangup 走可配置
-  shell 回调（默认日志+noop，回调里接“真正开门”），收到的对讲音频用播放器
-  （默认 ffplay）放出来。与 `replay_agent` 一样实现同一组 trait，对后端不可区分。
+  shell 回调（默认日志+noop，回调里接“真正开门”）。收到的对讲音频默认写文件
+  （raw S16LE 8 kHz mono），`--play` 才用 ffplay、`--player` 用自定义命令播放；
+  同一套 `AudioSink` 也用于 `emit-door` 收 Pad 语音。与 `replay_agent` 一样实现
+  同一组 trait，对后端不可区分。
 - `agent_server`：把任意实现暴露成 HTTP 控制面的适配器，手写 HTTP/1.1，不引入
   HTTP 库。
 - `agent::LiveAgent`（`run_live_agent` + `bridge`，仅 Linux）：AF_PACKET 抓桥、

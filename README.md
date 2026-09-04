@@ -122,8 +122,10 @@ cargo run -- door testdata/pad.cap --http 127.0.0.1:8080 --token secret \
   `--on-answer` / `--on-unlock` / `--on-hangup` (with `DOOR_EVENT` and
   `DOOR_SESSION` in the environment), or, when none is set, a log line and
   noop. This is where "open the real door" is wired.
-- The visitor's talk-back audio is played through the host speakers with
-  `--player` (default `ffplay`; pass `off` to drop it).
+- The visitor's talk-back audio is written to a file by default
+  (`visitor-talk.s16le`, raw S16LE 8 kHz mono; override with `--audio-out`).
+  Pass `--play` to hear it through ffplay, or `--player <cmd>` for a custom
+  player.
 
 Point the browser Pad or `scripts/agent-http-test.py` at it as usual; type
 `ring` in the door console to raise a call.
@@ -145,9 +147,11 @@ cargo run -- emit-door 192.168.104.108 --room-id S00XXXXXXXXX --frames testdata/
 It binds the control port, sends the ring, streams video/audio and keepalives,
 and listens for the Pad's replies, reporting and tallying the capability reply
 (`00b7/03`), answer (`00b7/05`), **unlock** (`00b7/06`) and **voice**
-(`00b7/0a` audio, played through `--player`, default ffplay). Answer on the
-Pad and watch the round-trip summary. `--door-id` / `--door-ip` set the
-door's own identity; `--seconds` bounds the run.
+(`00b7/0a` audio). The Pad's voice is written to a file by default
+(`pad-voice.s16le`, raw S16LE 8 kHz mono; override with `--audio-out`); pass
+`--play` to hear it through ffplay, or `--player <cmd>` for a custom player.
+Answer on the Pad and watch the round-trip summary. `--door-id` / `--door-ip`
+set the door's own identity; `--seconds` bounds the run.
 
 The Pad's IP can be resolved from its room Station ID over the private UDP
 10008 discovery protocol (an ARP-like "who has this room?" broadcast; the Pad
@@ -187,7 +191,7 @@ needs no AF_PACKET, so it runs on macOS too.
 cargo run -- pad-agent --listen 127.0.0.1:10000 --http 127.0.0.1:8080
 
 # terminal 2: ring it as a synthesized door station
-cargo run -- emit-door 127.0.0.1 --frames testdata/frames --player off
+cargo run -- emit-door 127.0.0.1 --frames testdata/frames
 ```
 
 Then open `http://127.0.0.1:8080/`: the page rings, shows the door picture,

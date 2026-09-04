@@ -103,7 +103,7 @@ pub struct DoorObservation {
 fn observe_reply(
     raw: &[u8],
     obs: &mut DoorObservation,
-    speaker: &mut Option<crate::door_station::Player>,
+    speaker: &mut Option<crate::door_station::AudioSink>,
 ) -> Option<String> {
     let msg = Message::parse(raw).ok()?;
     if msg.family != FAMILY_SESSION {
@@ -201,7 +201,7 @@ pub async fn run_emulator(
     target: SocketAddr,
     fps: u16,
     duration: Option<Duration>,
-    player: Option<String>,
+    sink: Option<crate::door_station::AudioSink>,
 ) -> Result<DoorObservation> {
     let mut identity = identity;
     let bind = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), target.port());
@@ -233,10 +233,7 @@ pub async fn run_emulator(
     );
 
     let obs = Arc::new(std::sync::Mutex::new(DoorObservation::default()));
-    let mut speaker = match player.as_deref() {
-        Some("") => None,
-        cmd => crate::door_station::Player::start_opt(cmd).ok().flatten(),
-    };
+    let mut speaker = sink;
 
     // Receiver: report control events and play the Pad's voice.
     let recv_socket = socket.clone();

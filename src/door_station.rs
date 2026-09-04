@@ -9,9 +9,10 @@
 //! Backends and the browser Pad connect to its HTTP control plane exactly as
 //! they would to a real Agent.
 
+use std::fs::File;
 use std::io::Write as _;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -54,9 +55,14 @@ pub struct DoorStationConfig {
     pub history: Duration,
     pub history_max_bytes: usize,
     pub callbacks: Callbacks,
-    /// Player for the visitor's talk audio (S16LE 8 kHz mono on stdin), or
-    /// `None` to drop it. Defaults to ffplay when unset at the CLI.
+    /// Play the visitor's talk audio through ffplay (the default player).
+    pub play: bool,
+    /// Custom player command for the visitor's talk audio (S16LE 8 kHz mono on
+    /// stdin); implies playing. Overrides `play`.
     pub player: Option<String>,
+    /// When not playing, write the visitor's talk audio as raw S16LE here
+    /// (defaults to `visitor-talk.s16le`).
+    pub audio_out: Option<PathBuf>,
 }
 
 impl Default for DoorStationConfig {
@@ -70,7 +76,9 @@ impl Default for DoorStationConfig {
             history: Duration::from_secs(5),
             history_max_bytes: 2 * 1024 * 1024,
             callbacks: Callbacks::default(),
+            play: false,
             player: None,
+            audio_out: None,
         }
     }
 }
@@ -92,7 +100,7 @@ pub struct DoorStation {
     latest: Mutex<Option<VideoFrame>>,
     history: MediaRing,
     streaming: AtomicBool,
-    speaker: Mutex<Option<Player>>,
+    speaker: Mutex<Option<AudioSink>>,
     started: Instant,
     runtime: tokio::runtime::Handle,
 }
@@ -119,6 +127,15 @@ impl DoorStation {
         );
         let (video, _) = broadcast::channel(32);
         let (door_audio, _) = broadcast::channel(128);
+        // Resolve the talk sink once: play only if asked, else write to a file.
+        let speaker = AudioSink::open(
+            config.play,
+            config.player.as_deref(),
+            config.audio_out.as_deref(),
+            "visitor-talk.s16le",
+        )
+        .map_err(|error| tracing::warn!(%error, "talk audio sink disabled"))
+        .ok();
         Ok(Arc::new(Self {
             frames,
             audio,
@@ -133,7 +150,7 @@ impl DoorStation {
             latest: Mutex::new(None),
             history: MediaRing::new(config.history, config.history_max_bytes),
             streaming: AtomicBool::new(false),
-            speaker: Mutex::new(None),
+            speaker: Mutex::new(speaker),
             started: Instant::now(),
             runtime: tokio::runtime::Handle::current(),
             config,
@@ -188,15 +205,8 @@ impl DoorStation {
         };
         let fps = self.config.loop_fps;
         self.runtime.spawn(async move {
-            if let Err(error) = crate::emitter::run_emulator(
-                identity,
-                media,
-                target,
-                fps,
-                None,
-                Some(String::new()),
-            )
-            .await
+            if let Err(error) =
+                crate::emitter::run_emulator(identity, media, target, fps, None, None).await
             {
                 tracing::warn!(%error, %target, "door emulation failed");
             }
@@ -286,40 +296,19 @@ impl DoorStation {
     }
 
     fn play_talk(&self, pcm: &[u8]) {
-        let Some(player) = self.player_command() else {
-            return;
-        };
         let mut guard = self.speaker.lock().unwrap();
-        if guard.is_none() {
-            match Player::start(&player) {
-                Ok(speaker) => {
-                    tracing::info!("playing visitor talk-back through the speaker");
-                    *guard = Some(speaker);
-                }
-                Err(error) => {
-                    tracing::warn!(%error, player, "could not start the audio player; dropping talk");
-                    return;
-                }
-            }
-        }
-        if let Some(speaker) = guard.as_mut() {
-            if speaker.write(pcm).is_err() {
-                tracing::warn!("audio player closed; will restart on next talk");
+        if let Some(sink) = guard.as_mut() {
+            if sink.write(pcm).is_err() {
+                tracing::warn!("talk audio sink closed; dropping further talk");
                 *guard = None;
             }
         }
     }
 
     fn stop_speaker(&self) {
-        self.speaker.lock().unwrap().take();
-    }
-
-    /// The configured player, or the ffplay default.
-    fn player_command(&self) -> Option<String> {
-        match self.config.player.as_deref() {
-            Some("") => None,
-            Some(cmd) => Some(cmd.to_owned()),
-            None => Some(DEFAULT_PLAYER.to_owned()),
+        // Keep the sink open across calls; just flush the file if writing.
+        if let Some(sink) = self.speaker.lock().unwrap().as_mut() {
+            sink.flush();
         }
     }
 }
@@ -350,18 +339,65 @@ impl Player {
         Ok(Self { child, stdin })
     }
 
-    /// Start from an optional command: `None` uses [`DEFAULT_PLAYER`],
-    /// `Some("")` disables playback (returns `Ok(None)`).
-    pub fn start_opt(command: Option<&str>) -> Result<Option<Self>> {
-        match command {
-            Some("") => Ok(None),
-            Some(cmd) => Self::start(cmd).map(Some),
-            None => Self::start(DEFAULT_PLAYER).map(Some),
+    pub fn write(&mut self, pcm: &[u8]) -> std::io::Result<()> {
+        self.stdin.write_all(pcm)
+    }
+}
+
+/// Where received PCM goes. Playing needs an explicit flag; otherwise the audio
+/// is written as raw S16LE 8 kHz mono to a file (import it later with, e.g.,
+/// `ffplay -f s16le -ar 8000 -ch_layout mono <file>`).
+pub enum AudioSink {
+    Play(Player),
+    File { file: File, path: PathBuf },
+}
+
+impl AudioSink {
+    /// Resolve from CLI intent. A custom `player` command or the `play` flag
+    /// plays; otherwise the audio is written to `audio_out` (or `default_file`
+    /// when unset). Returns `None` only when a player command was requested
+    /// but could not start.
+    pub fn open(
+        play: bool,
+        player: Option<&str>,
+        audio_out: Option<&Path>,
+        default_file: &str,
+    ) -> Result<Self> {
+        if let Some(cmd) = player.filter(|c| !c.is_empty()) {
+            tracing::info!(player = cmd, "playing received audio");
+            return Player::start(cmd).map(AudioSink::Play);
+        }
+        if play {
+            tracing::info!("playing received audio through ffplay");
+            return Player::start(DEFAULT_PLAYER).map(AudioSink::Play);
+        }
+        let path = audio_out
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(default_file));
+        let file = File::create(&path)
+            .with_context(|| format!("creating audio file {}", path.display()))?;
+        tracing::info!(
+            path = %path.display(),
+            "writing received audio to file (raw S16LE 8 kHz mono); pass --play to hear it instead"
+        );
+        Ok(AudioSink::File { file, path })
+    }
+
+    /// Write one PCM chunk. The file variant writes unbuffered so audio is not
+    /// lost if the process is terminated abruptly.
+    pub fn write(&mut self, pcm: &[u8]) -> std::io::Result<()> {
+        match self {
+            AudioSink::Play(player) => player.write(pcm),
+            AudioSink::File { file, .. } => file.write_all(pcm),
         }
     }
 
-    pub fn write(&mut self, pcm: &[u8]) -> std::io::Result<()> {
-        self.stdin.write_all(pcm)
+    pub fn flush(&mut self) {
+        if let AudioSink::File { file, path } = self {
+            if let Err(error) = file.flush() {
+                tracing::warn!(%error, path = %path.display(), "flushing audio file");
+            }
+        }
     }
 }
 

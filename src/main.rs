@@ -76,9 +76,17 @@ enum Commands {
         /// Shell command run on hangup.
         #[arg(long, value_name = "CMD")]
         on_hangup: Option<String>,
-        /// Player for visitor talk audio (S16LE 8k mono on stdin); "off" to drop it, default ffplay.
+        /// Play the visitor's talk audio through ffplay instead of writing it.
+        #[arg(long)]
+        play: bool,
+        /// Custom player command for the visitor's talk audio (S16LE 8k mono on
+        /// stdin); implies playing.
         #[arg(long, value_name = "CMD")]
         player: Option<String>,
+        /// When not playing, write the visitor's talk audio as raw S16LE here
+        /// (default: visitor-talk.s16le).
+        #[arg(long, value_name = "FILE")]
+        audio_out: Option<PathBuf>,
     },
     /// Emulate the door station from the protocol (not a replay): ring a
     /// target Pad with a synthesized call built from a door/room identity, so
@@ -114,9 +122,17 @@ enum Commands {
         /// Stop after this many seconds (default: until the Pad hangs up or Ctrl-C).
         #[arg(long, value_name = "SECONDS")]
         seconds: Option<f64>,
-        /// Player for the Pad's voice (S16LE 8k mono on stdin); "off" to drop it, default ffplay.
+        /// Play the Pad's voice through ffplay instead of writing it to a file.
+        #[arg(long)]
+        play: bool,
+        /// Custom player command for the Pad's voice (S16LE 8k mono on stdin);
+        /// implies playing.
         #[arg(long, value_name = "CMD")]
         player: Option<String>,
+        /// When not playing, write the Pad's voice as raw S16LE 8k mono here
+        /// (default: pad-voice.s16le).
+        #[arg(long, value_name = "FILE")]
+        audio_out: Option<PathBuf>,
         /// Broadcast address for UDP 10008 discovery, used when `target` is
         /// omitted (auto-discover the Pad by --room-id before ringing).
         #[arg(long, default_value = "255.255.255.255")]
@@ -240,7 +256,9 @@ async fn main() -> Result<()> {
             on_unlock,
             on_answer,
             on_hangup,
+            play,
             player,
+            audio_out,
         } => {
             use pad_gateway::door_station::{Callbacks, DoorStation, DoorStationConfig};
             let config = DoorStationConfig {
@@ -250,7 +268,9 @@ async fn main() -> Result<()> {
                     on_unlock,
                     on_hangup,
                 },
-                player: player.map(|p| if p == "off" { String::new() } else { p }),
+                play,
+                player,
+                audio_out,
                 ..Default::default()
             };
             let station = DoorStation::from_capture(&pcap, config)?;
@@ -273,7 +293,9 @@ async fn main() -> Result<()> {
             audio_file,
             fps,
             seconds,
+            play,
             player,
+            audio_out,
             broadcast,
             discover_timeout,
         } => {
@@ -312,11 +334,22 @@ async fn main() -> Result<()> {
                 room: Station::new(room_id, room_ip),
             };
             let media = MediaSource::load(&frames, audio_file.as_deref())?;
-            let player = player.map(|p| if p == "off" { String::new() } else { p });
+            let sink = pad_gateway::door_station::AudioSink::open(
+                play,
+                player.as_deref(),
+                audio_out.as_deref(),
+                "pad-voice.s16le",
+            )?;
             let duration = seconds.map(Duration::from_secs_f64);
-            let obs =
-                pad_gateway::emitter::run_emulator(identity, media, target, fps, duration, player)
-                    .await?;
+            let obs = pad_gateway::emitter::run_emulator(
+                identity,
+                media,
+                target,
+                fps,
+                duration,
+                Some(sink),
+            )
+            .await?;
             println!(
                 "round trip: capability_reply={} answered={} unlocks={} hangups={} voice_packets={} voice_bytes={}",
                 obs.capability_reply, obs.answered, obs.unlocks, obs.hangups, obs.audio_packets, obs.audio_bytes
