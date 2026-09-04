@@ -2,6 +2,7 @@ pub mod agent;
 pub mod agent_api;
 pub mod agent_server;
 pub mod config;
+pub mod door_station;
 pub mod ethernet;
 pub mod firewall;
 pub mod media;

@@ -23,6 +23,10 @@ Pad 未接听时成功；unlock 只在远程已接听时允许，默认 1 秒冷
   `EventLog`（事件环）、`CommandCache`（幂等缓存）、`MediaRing`（按时间和字节
   双上限的预录缓冲）。
 - `replay_agent`：进程内的 pcap 回放实现，走生产状态机和编码器，只是不注入。
+- `door_station`：可交互的软件门口机。用保存的抓包帧/音频当门口摄像头和麦克风（呼叫
+  期间按 `loop_fps` 循环），从 stdin 控制台 ring/hangup，claim/unlock/hangup 走可配置
+  shell 回调（默认日志+noop，回调里接“真正开门”），收到的对讲音频用播放器
+  （默认 ffplay）放出来。与 `replay_agent` 一样实现同一组 trait，对后端不可区分。
 - `agent_server`：把任意实现暴露成 HTTP 控制面的适配器，手写 HTTP/1.1，不引入
   HTTP 库。
 - 真实抓包 Agent（`agent::run_live_agent` + `bridge`）目前仍走旧的 PAG1

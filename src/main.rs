@@ -53,6 +53,35 @@ enum Commands {
         #[arg(long, default_value_t = 2048)]
         history_max_kib: u64,
     },
+    /// Run an interactive software door station you operate from the console.
+    Door {
+        #[arg(default_value = "testdata/pad.cap")]
+        pcap: PathBuf,
+        /// HTTP control plane address (REST + SSE) backends and the Pad connect to.
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        http: SocketAddr,
+        /// Bearer token for the control plane.
+        #[arg(long)]
+        token: Option<String>,
+        /// Serve Swagger UI at /swagger.
+        #[arg(long)]
+        swagger: bool,
+        /// Frames per second at which the saved camera loops.
+        #[arg(long, default_value_t = 8)]
+        loop_fps: u16,
+        /// Shell command run on unlock (env DOOR_EVENT, DOOR_SESSION); default logs.
+        #[arg(long, value_name = "CMD")]
+        on_unlock: Option<String>,
+        /// Shell command run when a backend answers.
+        #[arg(long, value_name = "CMD")]
+        on_answer: Option<String>,
+        /// Shell command run on hangup.
+        #[arg(long, value_name = "CMD")]
+        on_hangup: Option<String>,
+        /// Player for visitor talk audio (S16LE 8k mono on stdin); "off" to drop it, default ffplay.
+        #[arg(long, value_name = "CMD")]
+        player: Option<String>,
+    },
     /// Consume the legacy PAG1 WebSocket feed of an Agent (smoke test).
     Pag1Client {
         #[arg(long, default_value = "ws://127.0.0.1:9443")]
@@ -131,6 +160,38 @@ async fn main() -> Result<()> {
                 });
             }
             run_fake_agent(listen, pcap, speed, Duration::from_secs(1), repeat).await?;
+        }
+        Commands::Door {
+            pcap,
+            http,
+            token,
+            swagger,
+            loop_fps,
+            on_unlock,
+            on_answer,
+            on_hangup,
+            player,
+        } => {
+            use pad_gateway::door_station::{Callbacks, DoorStation, DoorStationConfig};
+            let config = DoorStationConfig {
+                loop_fps,
+                callbacks: Callbacks {
+                    on_answer,
+                    on_unlock,
+                    on_hangup,
+                },
+                player: player.map(|p| if p == "off" { String::new() } else { p }),
+                ..Default::default()
+            };
+            let station = DoorStation::from_capture(&pcap, config)?;
+            pad_gateway::door_station::spawn_console(station.clone());
+            let server = pad_gateway::agent_server::ServerConfig {
+                listen: http,
+                token: token.filter(|t| !t.is_empty()),
+                swagger,
+                ..Default::default()
+            };
+            pad_gateway::agent_server::serve(server, station).await?;
         }
         Commands::Pag1Client { agent, scripted } => run_backend(&agent, scripted).await?,
         Commands::CheckConfig { path } => {

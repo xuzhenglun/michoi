@@ -102,6 +102,31 @@ curl -X POST -H 'Authorization: Bearer secret' -H 'Accept: application/json' -H 
 open http://127.0.0.1:8080/swagger
 ```
 
+### Software door station
+
+`fake-agent` replays the capture on a fixed timeline (a locked demo). The
+`door` subcommand is the interactive counterpart: a software door station you
+operate, so a person can sit on the door side while the browser Pad or a
+backend acts as the room. It serves the same HTTP control plane.
+
+```sh
+cargo run -- door testdata/pad.cap --http 127.0.0.1:8080 --token secret \
+  --on-unlock 'echo opened; curl -s http://relay/open'
+```
+
+- Camera and microphone are the saved capture, looped at `--loop-fps` while a
+  call is up (so the room sees a plausible door feed and hears door audio).
+- The console reads `ring` (start a call), `hangup`, `quit` from stdin.
+- `claim`, `unlock` and `hangup` invoke a callback: the shell command from
+  `--on-answer` / `--on-unlock` / `--on-hangup` (with `DOOR_EVENT` and
+  `DOOR_SESSION` in the environment), or, when none is set, a log line and
+  noop. This is where "open the real door" is wired.
+- The visitor's talk-back audio is played through the host speakers with
+  `--player` (default `ffplay`; pass `off` to drop it).
+
+Point the browser Pad or `scripts/agent-http-test.py` at it as usual; type
+`ring` in the door console to raise a call.
+
 ### Browser Pad
 
 The Agent serves a self-contained page at `/pad` (also `/`) that behaves
