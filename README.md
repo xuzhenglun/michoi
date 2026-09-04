@@ -127,46 +127,34 @@ cargo run -- door testdata/pad.cap --http 127.0.0.1:8080 --token secret \
 Point the browser Pad or `scripts/agent-http-test.py` at it as usual; type
 `ring` in the door console to raise a call.
 
-To ring a **real** room Pad (or another Agent's capture path) instead of the
-internal HTTP clients, replay the captured door→Pad datagrams onto the wire:
-type `ring 192.168.124.61` in the door console, or use the standalone command
-
-```sh
-cargo run -- emit-door 192.168.124.61 testdata/pad.cap
-```
-
-It sends the door's `00b7/01` session setup and then the JPEG and audio to the
-target UDP control port, verbatim and with capture timing, so the target sees
-the same call.
-
-By default `emit-door` is a **two-way door emulator**: on one control-port
-socket it rings the target and then listens for what the Pad sends back, so
-you can pretend to be the door, answer on the (possibly far-away) real Pad,
-and confirm the round trip. It reports and tallies the Pad's answer
-(`00b7/05`), **unlock** (`00b7/06`) and **voice** (`00b7/0a` audio), and plays
-the voice through `--player` (default ffplay, `off` to drop). `--no-listen`
-falls back to fire-and-forget. This is how the Agent, and later the HAP/Matter
-backends, get validated end to end without the hardware on the same desk.
-
-`scripts/fake-pad.py` is a tiny standard-library Pad that answers, unlocks and
-sends one voice packet, used to test the emulator itself:
-
-```sh
-python3 scripts/fake-pad.py &                       # listens on 127.0.0.1:10077
-cargo run -- emit-door 127.0.0.1:10077 --speed 20 --player off
-# round trip: answered=true unlocks=1 hangups=0 voice_packets=1 voice_bytes=512
-```
-
-The captured body carries the old station IDs and IPs, and a real Pad keys on
-the room address in the body, not the UDP source. So `emit-door` rewrites the
-body's room IP to the target IP by default; override with `--room-ip`,
-`--room-id` (from the Pad's label/config) and `--door-id` as needed, or
-`--room-ip keep` to send verbatim. Ringing a Pad at 192.168.104.108 is then:
+To pretend to be the door station and ring a **real** room Pad (or another
+Agent), `emit-door` synthesizes the call from the protocol — it does not
+replay the capture. Every datagram (`00b7/01` ring, `00b7/0a` video and
+audio, keepalive, hangup) is built by our code from a configured door/room
+identity, so a real Pad's response tells you whether the protocol analysis is
+right. The camera is a directory of JPEG files (a fake camera device); audio
+is a raw-PCM file or silence.
 
 ```sh
 cargo run -- emit-door 192.168.104.108
-# add --room-id S0000000XXXX if the Pad only answers to its own station id
+# room IP defaults to the target; set the Pad's own station id if it checks it:
+cargo run -- emit-door 192.168.104.108 --room-id S00XXXXXXXXX --frames testdata/frames
 ```
+
+It binds the control port, sends the ring, streams video/audio and keepalives,
+and listens for the Pad's replies, reporting and tallying the capability reply
+(`00b7/03`), answer (`00b7/05`), **unlock** (`00b7/06`) and **voice**
+(`00b7/0a` audio, played through `--player`, default ffplay). Answer on the
+Pad and watch the round-trip summary. `--door-id` / `--door-ip` set the
+door's own identity; `--seconds` bounds the run; discovery (the UDP 10008
+device-id→IP lookup) is skipped, you give the Pad's IP directly.
+
+The reconstruction is checked in unit tests: `session_request` reproduces the
+captured ring byte for byte, and `jpeg_packets` reproduces the captured
+fragmentation and round-trips a frame. `scripts/fake-pad.py` answers, unlocks
+and sends a voice packet so the emulator can be tested end to end without
+hardware. This is the harness for validating the Agent and, later, the
+HAP/Matter backends when the real door and Pad are far apart.
 
 ### Browser Pad
 

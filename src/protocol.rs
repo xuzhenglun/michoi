@@ -180,6 +180,65 @@ pub fn packet(family: u16, opcode: u32, declared: u32, body: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The fixed 174-byte capability descriptor the door station sends in its
+/// `00b7/01` session request, after the endpoint block. Begins with
+/// `VIDEOA`. Its per-field meaning is not fully reverse-engineered, but it is
+/// constant across the call, so a faithful door emulator reproduces it
+/// verbatim while filling the endpoints from configuration.
+pub const SESSION_REQUEST_CAPABILITY: [u8; 174] = [
+    0x56, 0x49, 0x44, 0x45, 0x4f, 0x41, 0x06, 0x00, 0x32, 0x00, 0x33, 0x00, 0x34, 0x00, 0x64, 0x00,
+    0x6e, 0x00, 0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x0a, 0x00, 0x0a, 0x00, 0x14, 0x00, 0x1e, 0x00, 0x28, 0x00, 0x32, 0x00, 0x33, 0x00, 0x34, 0x00,
+    0x64, 0x00, 0x6e, 0x00, 0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x09, 0x00, 0x0a, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x09, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// Build the door's `00b7/01` session request (the ring) from the two
+/// endpoint identities. This is synthesized from the protocol, not replayed:
+/// only the endpoints vary per call; the capability descriptor is a constant.
+pub fn session_request(endpoints: &Endpoints) -> Result<Vec<u8>, ProtocolError> {
+    let mut body = endpoints.pack()?.to_vec();
+    body.extend_from_slice(&SESSION_REQUEST_CAPABILITY);
+    Ok(packet(FAMILY_SESSION, OP_REQUEST, 254, &body))
+}
+
+/// Fragment a complete JPEG frame into `00b7/0a` media packets, matching the
+/// captured wire: 1200-byte slots, 1-based fragment index, `valid_length`
+/// giving the real bytes in the final (zero-padded) slot.
+pub fn jpeg_packets(
+    sequence: u16,
+    jpeg: &[u8],
+    endpoints: &Endpoints,
+) -> Result<Vec<Vec<u8>>, ProtocolError> {
+    const SLOT: usize = 1200;
+    let endpoint_block = endpoints.pack()?;
+    let frag_count = jpeg.len().div_ceil(SLOT).max(1) as u16;
+    let mut packets = Vec::with_capacity(frag_count as usize);
+    for (index, chunk) in jpeg.chunks(SLOT).enumerate() {
+        let mut body = endpoint_block.to_vec();
+        for value in [
+            MEDIA_JPEG,
+            sequence,
+            frag_count,
+            index as u16 + 1,
+            chunk.len() as u16,
+        ] {
+            body.extend_from_slice(&value.to_le_bytes());
+        }
+        body.extend_from_slice(chunk);
+        // Pad the slot to its fixed size; valid_length says how much is real.
+        body.resize(endpoint_block.len() + 10 + SLOT, 0);
+        packets.push(packet(FAMILY_SESSION, OP_MEDIA, 1290, &body));
+    }
+    Ok(packets)
+}
+
 pub fn session_control(opcode: u32, endpoints: &Endpoints) -> Result<Vec<u8>, ProtocolError> {
     Ok(packet(FAMILY_SESSION, opcode, 80, &endpoints.pack()?))
 }
@@ -324,5 +383,89 @@ impl JpegReassembler {
                 self.frames.remove(&old);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod builder_tests {
+    use super::*;
+    use crate::pcap::read_udp;
+
+    fn captured(opcode: u32) -> Option<Vec<u8>> {
+        for record in read_udp("testdata/pad.cap").unwrap() {
+            for raw in split_coalesced(&record.payload) {
+                if let Ok(msg) = Message::parse(raw) {
+                    if msg.family == FAMILY_SESSION && msg.opcode == opcode {
+                        return Some(raw.to_vec());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn session_request_reproduces_the_captured_ring() {
+        let capture = captured(OP_REQUEST).expect("00b7/01 in capture");
+        let endpoints = Endpoints::parse(&capture[32..80]).unwrap();
+        let built = session_request(&endpoints).unwrap();
+        assert_eq!(
+            built, capture,
+            "synthesized ring must match the captured bytes"
+        );
+    }
+
+    #[test]
+    fn jpeg_packets_match_the_captured_fragmentation() {
+        // Reassemble the first captured door frame, then re-fragment it.
+        let mut reasm = JpegReassembler::default();
+        let mut first_seq = None;
+        let mut endpoints = None;
+        let mut frame = None;
+        'outer: for record in read_udp("testdata/pad.cap").unwrap() {
+            if record.source_ip != std::net::Ipv4Addr::new(192, 168, 124, 2) {
+                continue;
+            }
+            for raw in split_coalesced(&record.payload) {
+                let Ok(msg) = Message::parse(raw) else {
+                    continue;
+                };
+                if msg.family != FAMILY_SESSION || msg.opcode != OP_MEDIA {
+                    continue;
+                }
+                let Some(media) = msg.media() else { continue };
+                if media.media_type != MEDIA_JPEG {
+                    continue;
+                }
+                first_seq.get_or_insert(media.sequence);
+                endpoints.get_or_insert_with(|| Endpoints::parse(&msg.body[..48]).unwrap());
+                if let Some(complete) = reasm.push(&media) {
+                    frame = Some(complete);
+                    break 'outer;
+                }
+            }
+        }
+        let frame = frame.expect("a complete captured frame");
+        let seq = first_seq.unwrap();
+        let endpoints = endpoints.unwrap();
+        let packets = jpeg_packets(seq, &frame, &endpoints).unwrap();
+        // Every packet is the fixed 1290-byte size and the valid_length of the
+        // last fragment equals the remainder.
+        assert!(packets.iter().all(|p| p.len() == 1290));
+        assert_eq!(packets.len(), frame.len().div_ceil(1200));
+        let last = Message::parse(packets.last().unwrap()).unwrap();
+        let media = last.media().unwrap();
+        assert_eq!(
+            media.valid_length as usize,
+            frame.len() - 1200 * (packets.len() - 1)
+        );
+        // Reassembling the synthesized packets yields the original frame.
+        let mut check = JpegReassembler::default();
+        let mut round = None;
+        for p in &packets {
+            let media = Message::parse(p).unwrap().media().unwrap();
+            round = check.push(&media);
+        }
+        assert_eq!(round.unwrap(), frame);
     }
 }

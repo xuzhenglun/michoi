@@ -81,7 +81,6 @@ struct CallInner {
 }
 
 pub struct DoorStation {
-    capture: std::path::PathBuf,
     frames: Vec<Arc<[u8]>>,
     audio: Vec<Arc<[u8]>>,
     config: DoorStationConfig,
@@ -102,8 +101,7 @@ impl DoorStation {
     /// Load the saved camera/microphone data from a capture and build a door
     /// station ready to be served.
     pub fn from_capture(pcap: impl AsRef<Path>, config: DoorStationConfig) -> Result<Arc<Self>> {
-        let capture = pcap.as_ref().to_path_buf();
-        let timeline = replay_timeline(&capture)?;
+        let timeline = replay_timeline(pcap)?;
         let mut frames = Vec::new();
         let mut audio = Vec::new();
         for timed in &timeline {
@@ -122,7 +120,6 @@ impl DoorStation {
         let (video, _) = broadcast::channel(32);
         let (door_audio, _) = broadcast::channel(128);
         Ok(Arc::new(Self {
-            capture,
             frames,
             audio,
             call: Mutex::new(CallInner {
@@ -182,18 +179,26 @@ impl DoorStation {
     /// Ring a real room Pad by replaying the captured door->Pad datagrams to
     /// `target` over the wire. Independent of the internal HTTP call state.
     pub fn emit_to(self: &Arc<Self>, target: SocketAddr) {
-        let capture = self.capture.clone();
-        let door_ip = self.config.door_ip;
+        let door = crate::protocol::Station::new(self.config.door_id.clone(), self.config.door_ip);
+        let room = crate::protocol::Station::new(self.config.room_id.clone(), target_v4(&target));
+        let identity = crate::emitter::DoorIdentity { door, room };
+        let media = crate::emitter::MediaSource {
+            frames: self.frames.iter().map(|f| f.to_vec()).collect(),
+            audio: self.audio.iter().map(|a| a.to_vec()).collect(),
+        };
+        let fps = self.config.loop_fps;
         self.runtime.spawn(async move {
-            // Rewrite the body's room IP to the target so a real Pad accepts it.
-            let over = crate::emitter::EndpointOverride {
-                room_ip: Some(target_v4(&target)),
-                ..Default::default()
-            };
-            if let Err(error) =
-                crate::emitter::emit_capture(&capture, door_ip, target, 1.0, None, &over).await
+            if let Err(error) = crate::emitter::run_emulator(
+                identity,
+                media,
+                target,
+                fps,
+                None,
+                Some(String::new()),
+            )
+            .await
             {
-                tracing::warn!(%error, %target, "emitting door traffic failed");
+                tracing::warn!(%error, %target, "door emulation failed");
             }
         });
     }

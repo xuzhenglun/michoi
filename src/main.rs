@@ -82,38 +82,40 @@ enum Commands {
         #[arg(long, value_name = "CMD")]
         player: Option<String>,
     },
-    /// Pretend to be the door station: ring a target (a real room Pad or
-    /// another Agent) with the captured call and report/play what comes back
-    /// (answer, unlock, voice). Answer on the Pad to test the round trip.
+    /// Emulate the door station from the protocol (not a replay): ring a
+    /// target Pad with a synthesized call built from a door/room identity, so
+    /// interacting with a real Pad validates the protocol. Camera frames come
+    /// from a directory; audio from a file or silence.
     EmitDoor {
-        /// Target `ip` or `ip:port` (port defaults to the control port).
+        /// Target Pad `ip` or `ip:port` (port defaults to the control port).
         target: String,
-        #[arg(default_value = "testdata/pad.cap")]
-        pcap: PathBuf,
-        /// Source door IPv4 in the capture, used to pick door->Pad datagrams.
+        /// Door (own) Station ID.
+        #[arg(long, default_value = "M00000000000")]
+        door_id: String,
+        /// Door (own) IPv4 written into the packet body.
         #[arg(long, default_value = "192.168.124.2")]
         door_ip: std::net::Ipv4Addr,
-        #[arg(long, default_value_t = 1.0)]
-        speed: f64,
-        /// Send the call again after this many idle seconds.
+        /// Room (target) Station ID the Pad answers to.
+        #[arg(long, default_value = "S00000000000")]
+        room_id: String,
+        /// Room IPv4 in the body; defaults to the target IP.
+        #[arg(long, value_name = "IP")]
+        room_ip: Option<std::net::Ipv4Addr>,
+        /// Directory of JPEG frames used as the camera.
+        #[arg(long, default_value = "testdata/frames")]
+        frames: PathBuf,
+        /// Raw S16LE 8 kHz mono PCM file used as the microphone (default: silence).
+        #[arg(long, value_name = "FILE")]
+        audio_file: Option<PathBuf>,
+        /// Camera frame rate.
+        #[arg(long, default_value_t = 8)]
+        fps: u16,
+        /// Stop after this many seconds (default: until the Pad hangs up or Ctrl-C).
         #[arg(long, value_name = "SECONDS")]
-        repeat_after: Option<f64>,
+        seconds: Option<f64>,
         /// Player for the Pad's voice (S16LE 8k mono on stdin); "off" to drop it, default ffplay.
         #[arg(long, value_name = "CMD")]
         player: Option<String>,
-        /// Fire and forget: do not listen for the Pad's replies.
-        #[arg(long)]
-        no_listen: bool,
-        /// Rewrite the room IP in the packet body (default: the target IP, so a
-        /// real Pad accepts the call); "keep" sends the captured value.
-        #[arg(long, value_name = "IP")]
-        room_ip: Option<String>,
-        /// Rewrite the room Station ID in the body (from the Pad's label/config).
-        #[arg(long, value_name = "ID")]
-        room_id: Option<String>,
-        /// Rewrite the door Station ID in the body.
-        #[arg(long, value_name = "ID")]
-        door_id: Option<String>,
     },
     /// Consume the legacy PAG1 WebSocket feed of an Agent (smoke test).
     Pag1Client {
@@ -228,59 +230,45 @@ async fn main() -> Result<()> {
         }
         Commands::EmitDoor {
             target,
-            pcap,
-            door_ip,
-            speed,
-            repeat_after,
-            player,
-            no_listen,
-            room_ip,
-            room_id,
             door_id,
+            door_ip,
+            room_id,
+            room_ip,
+            frames,
+            audio_file,
+            fps,
+            seconds,
+            player,
         } => {
+            use pad_gateway::emitter::{DoorIdentity, MediaSource};
+            use pad_gateway::protocol::{Station, CONTROL_PORT};
             let target = match target.parse::<SocketAddr>() {
                 Ok(addr) => addr,
                 Err(_) => {
                     let ip: std::net::Ipv4Addr = target
                         .parse()
                         .map_err(|_| anyhow::anyhow!("invalid target: {target}"))?;
-                    SocketAddr::new(ip.into(), pad_gateway::protocol::CONTROL_PORT)
+                    SocketAddr::new(ip.into(), CONTROL_PORT)
                 }
             };
-            // Default: rewrite the body's room IP to the target so a real Pad
-            // accepts the call. `--room-ip keep` sends the captured value.
-            let room_ip = match room_ip.as_deref() {
-                Some("keep") => None,
-                Some(ip) => Some(
-                    ip.parse()
-                        .map_err(|_| anyhow::anyhow!("invalid --room-ip"))?,
-                ),
-                None => match target.ip() {
-                    std::net::IpAddr::V4(ip) => Some(ip),
-                    std::net::IpAddr::V6(_) => None,
-                },
+            let room_ip = room_ip.unwrap_or(match target.ip() {
+                std::net::IpAddr::V4(ip) => ip,
+                std::net::IpAddr::V6(_) => anyhow::bail!("IPv6 target needs an explicit --room-ip"),
+            });
+            let identity = DoorIdentity {
+                door: Station::new(door_id, door_ip),
+                room: Station::new(room_id, room_ip),
             };
-            let over = pad_gateway::emitter::EndpointOverride {
-                door_id,
-                door_ip: None,
-                room_id,
-                room_ip,
-            };
-            let repeat = repeat_after.map(Duration::from_secs_f64);
-            if no_listen {
-                pad_gateway::emitter::emit_capture(&pcap, door_ip, target, speed, repeat, &over)
+            let media = MediaSource::load(&frames, audio_file.as_deref())?;
+            let player = player.map(|p| if p == "off" { String::new() } else { p });
+            let duration = seconds.map(Duration::from_secs_f64);
+            let obs =
+                pad_gateway::emitter::run_emulator(identity, media, target, fps, duration, player)
                     .await?;
-            } else {
-                let player = player.map(|p| if p == "off" { String::new() } else { p });
-                let obs = pad_gateway::emitter::run_emulator(
-                    &pcap, door_ip, target, speed, repeat, player, &over,
-                )
-                .await?;
-                println!(
-                    "round trip: answered={} unlocks={} hangups={} voice_packets={} voice_bytes={}",
-                    obs.answered, obs.unlocks, obs.hangups, obs.audio_packets, obs.audio_bytes
-                );
-            }
+            println!(
+                "round trip: capability_reply={} answered={} unlocks={} hangups={} voice_packets={} voice_bytes={}",
+                obs.capability_reply, obs.answered, obs.unlocks, obs.hangups, obs.audio_packets, obs.audio_bytes
+            );
         }
         Commands::Pag1Client { agent, scripted } => run_backend(&agent, scripted).await?,
         Commands::CheckConfig { path } => {
