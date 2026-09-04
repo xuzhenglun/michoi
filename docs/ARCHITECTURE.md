@@ -23,13 +23,16 @@ Pad 未接听时成功；unlock 只在远程已接听时允许，默认 1 秒冷
   `EventLog`（事件环）、`CommandCache`（幂等缓存）、`MediaRing`（按时间和字节
   双上限的预录缓冲）。
 - `replay_agent`：进程内的 pcap 回放实现，走生产状态机和编码器，只是不注入。
-- `emitter`：从协议合成的软件门口机模拟器。按配置的门口机/房间身份构造 `00b7/01`
-  ring、`00b7/0a` 视频/音频、keepalive、hangup（不重放抓包），画面来自 JPEG 文件目录
-  （假摄像头），音频来自 PCM 文件或静音；发出后监听 Pad 的回包（capability/answer/
-  unlock/voice/hangup）并报告、播放。`session_request` 和 `jpeg_packets` 有“合成==抓包”
-  单测自证。UDP 10008 的设备 ID→IP 查询（类 ARP：广播 `01+room_id`，Pad 从自身地址回
-  `02+room_id`，取应答源 IP）由 `resolve_pad` 实现，`resolve` 子命令或 `emit-door
-  --discover` 使用。用途：
+- `emitter`：从协议合成的软件门口机模拟器。按配置的门口机/房间身份，按实机验证的
+  呼叫顺序发包：`005d/01` 寻呼 ×10（振铃触发）→ `0098/01` bootstrap → `00b7/01`
+  ring ×3 → `00b7/0a` 视频 + keepalive；**音频在收到 Pad 的 `00b7/05` answer 后才发**
+  （振铃期发音频会抑制 Pad 本地铃声）；结束发 hangup。全部从协议合成、不重放抓包。
+  画面来自 JPEG 文件目录（假摄像头），音频来自 PCM 文件或静音；`--door-ip` 缺省时从
+  connect 到 Pad 后的本机出口地址自动取，写进包体供 Pad 回包。发出后监听 Pad 的回包
+  （capability/answer/unlock/voice/hangup）并报告、播放。`session_request`、`jpeg_packets`、
+  `page_request`、`bootstrap_request` 有“合成==抓包”单测自证。UDP 10008 的设备 ID→IP 查询（类 ARP：广播 `01+room_id`，Pad 从自身地址回
+  `02+room_id`，取应答源 IP）由 `resolve_pad` 实现，`resolve` 子命令使用，也已内建进
+  `emit-door`：省略目标即按 `--room-id` 自动发现 Pad IP 后再呼叫。用途：
   在门口机与 Pad 相距很远时，验证我们分析的协议、以及 Agent/后端的正确性。
 - `door_station`：可交互的软件门口机。用保存的抓包帧/音频当门口摄像头和麦克风（呼叫
   期间按 `loop_fps` 循环），从 stdin 控制台 ring/hangup，claim/unlock/hangup 走可配置
@@ -100,8 +103,8 @@ RTSP，视频用 RFC 2435 RTP/JPEG，音频 PCMU/L16，RTP 时间戳加 RTCP SR 
 
 ## 共存与 first-answer 静默
 
-振铃靠门口机→Pad 的 `00b7/01` session setup 和持续媒体维持；结束靠发往 Pad 的
-`00b7/1e`（抓包里门口机重复 3 次）。据此：
+振铃由门口机→Pad 的 `005d/01` 寻呼触发，靠 `00b7/01` session setup 建立的会话和
+持续媒体维持；结束靠发往 Pad 的 `00b7/1e`（抓包里门口机重复 3 次）。据此：
 
 - **振铃阶段不下任何规则**，门口机→Pad 正常，物理 Pad 和所有订阅后端一起响、都能
   看画面。Agent 靠 AF_PACKET 在 RX 侧旁路嗅探，nft forward drop 不影响它继续把媒体

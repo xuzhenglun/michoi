@@ -203,7 +203,7 @@ pub async fn run_emulator(
     duration: Option<Duration>,
     player: Option<String>,
 ) -> Result<DoorObservation> {
-    let endpoints = identity.endpoints();
+    let mut identity = identity;
     let bind = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), target.port());
     let socket = match UdpSocket::bind(bind).await {
         Ok(socket) => socket,
@@ -216,6 +216,15 @@ pub async fn run_emulator(
         .connect(target)
         .await
         .with_context(|| format!("connecting to {target}"))?;
+    // Auto-fill the door's own IP from the local address the kernel routes to
+    // the Pad through (0.0.0.0 is the "detect me" sentinel). The Pad replies to
+    // the IP written in the packet body, so it must be our real address.
+    if identity.door.ip.is_unspecified() {
+        if let std::net::IpAddr::V4(local) = socket.local_addr()?.ip() {
+            identity.door.ip = local;
+        }
+    }
+    let endpoints = identity.endpoints();
     let socket = Arc::new(socket);
     tracing::info!(
         %target, local = %socket.local_addr()?, door = %identity.door.id, room = %identity.room.id,
@@ -257,11 +266,25 @@ pub async fn run_emulator(
         }
     });
 
+    // Pre-call handshake, in the order the real door does it:
+    //  1. 005d/01 paging burst (~10x at 100 ms) -- this is what rings the Pad,
+    //  2. 0098/01 bootstrap request (the Pad answers with 0098/02),
+    //  3. 00b7/01 session request x3 (the media session; the Pad replies 00b7/03).
+    // Only after this does the Pad actually ring, so a person can answer.
+    for _ in 0..10 {
+        let _ = socket.send(&crate::protocol::page_request()).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let _ = socket.send(&crate::protocol::bootstrap_request()).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
     // Ring, then stream media and keepalives until stopped.
-    socket
-        .send(&crate::protocol::session_request(&endpoints)?)
-        .await
-        .context("sending session request")?;
+    for _ in 0..3 {
+        socket
+            .send(&crate::protocol::session_request(&endpoints)?)
+            .await
+            .context("sending session request")?;
+    }
     let frame_gap = Duration::from_micros(1_000_000 / fps.max(1) as u64);
     let mut frame_at = tokio::time::interval(frame_gap);
     let mut audio_at = tokio::time::interval(Duration::from_millis(32));
@@ -293,6 +316,12 @@ pub async fn run_emulator(
                 seq = seq.wrapping_add(1);
             }
             _ = audio_at.tick() => {
+                // Hold audio until the Pad answers: the real door opens the
+                // voice channel only after 00b7/05. Streaming audio during the
+                // ring makes the Pad go straight to "in-call" and never ring.
+                if !obs.lock().unwrap().answered {
+                    continue;
+                }
                 let pcm = if media.audio.is_empty() {
                     &silence
                 } else {

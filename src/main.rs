@@ -88,13 +88,16 @@ enum Commands {
     /// from a directory; audio from a file or silence.
     EmitDoor {
         /// Target Pad `ip` or `ip:port` (port defaults to the control port).
-        target: String,
+        /// Omit it to auto-discover the Pad from --room-id over UDP 10008.
+        target: Option<String>,
         /// Door (own) Station ID.
         #[arg(long, default_value = "M00000000000")]
         door_id: String,
-        /// Door (own) IPv4 written into the packet body.
-        #[arg(long, default_value = "192.168.124.2")]
-        door_ip: std::net::Ipv4Addr,
+        /// Door (own) IPv4 written into the packet body. Defaults to this
+        /// host's own address on the route to the Pad (auto-detected); the Pad
+        /// replies to this address, so it must be reachable.
+        #[arg(long, value_name = "IP")]
+        door_ip: Option<std::net::Ipv4Addr>,
         /// Room (target) Station ID the Pad answers to.
         #[arg(long, default_value = "S00000000000")]
         room_id: String,
@@ -116,10 +119,13 @@ enum Commands {
         /// Player for the Pad's voice (S16LE 8k mono on stdin); "off" to drop it, default ffplay.
         #[arg(long, value_name = "CMD")]
         player: Option<String>,
-        /// Resolve the target IP from --room-id via UDP 10008 discovery
-        /// instead of requiring it; `target` is then the broadcast address.
-        #[arg(long)]
-        discover: bool,
+        /// Broadcast address for UDP 10008 discovery, used when `target` is
+        /// omitted (auto-discover the Pad by --room-id before ringing).
+        #[arg(long, default_value = "255.255.255.255")]
+        broadcast: std::net::Ipv4Addr,
+        /// Seconds to wait for a discovery reply.
+        #[arg(long, default_value_t = 3.0)]
+        discover_timeout: f64,
     },
     /// Resolve a Pad's IP from its room Station ID over the UDP 10008
     /// discovery protocol (a private ARP): broadcast a query, read the reply.
@@ -255,19 +261,14 @@ async fn main() -> Result<()> {
             fps,
             seconds,
             player,
-            discover,
+            broadcast,
+            discover_timeout,
         } => {
             use pad_gateway::emitter::{resolve_pad, DoorIdentity, MediaSource};
             use pad_gateway::protocol::{Station, CONTROL_PORT};
-            let target = if discover {
-                // `target` is the broadcast address; resolve the Pad IP by room id.
-                let broadcast: std::net::Ipv4Addr = target.parse().map_err(|_| {
-                    anyhow::anyhow!("--discover needs a broadcast address as target")
-                })?;
-                let ip = resolve_pad(&room_id, broadcast, Duration::from_secs(3)).await?;
-                SocketAddr::new(ip.into(), CONTROL_PORT)
-            } else {
-                match target.parse::<SocketAddr>() {
+            let target = match target {
+                // Explicit target: `ip` or `ip:port`, no discovery.
+                Some(target) => match target.parse::<SocketAddr>() {
                     Ok(addr) => addr,
                     Err(_) => {
                         let ip: std::net::Ipv4Addr = target
@@ -275,12 +276,24 @@ async fn main() -> Result<()> {
                             .map_err(|_| anyhow::anyhow!("invalid target: {target}"))?;
                         SocketAddr::new(ip.into(), CONTROL_PORT)
                     }
+                },
+                // No target: auto-discover the Pad by room id (the private ARP).
+                None => {
+                    let ip = resolve_pad(
+                        &room_id,
+                        broadcast,
+                        Duration::from_secs_f64(discover_timeout),
+                    )
+                    .await?;
+                    SocketAddr::new(ip.into(), CONTROL_PORT)
                 }
             };
             let room_ip = room_ip.unwrap_or(match target.ip() {
                 std::net::IpAddr::V4(ip) => ip,
                 std::net::IpAddr::V6(_) => anyhow::bail!("IPv6 target needs an explicit --room-ip"),
             });
+            // 0.0.0.0 is the "auto-detect my own IP" sentinel for the emulator.
+            let door_ip = door_ip.unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
             let identity = DoorIdentity {
                 door: Station::new(door_id, door_ip),
                 room: Station::new(room_id, room_ip),

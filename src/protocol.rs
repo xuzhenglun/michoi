@@ -7,6 +7,7 @@ pub const MAGIC: &[u8; 8] = b"PENGUIN0";
 pub const CONTROL_PORT: u16 = 10_000;
 pub const DISCOVERY_PORT: u16 = 10_008;
 
+pub const FAMILY_PAGE: u16 = 0x005d;
 pub const FAMILY_BOOTSTRAP: u16 = 0x0098;
 pub const FAMILY_SESSION: u16 = 0x00b7;
 pub const FAMILY_SNAPSHOT_NAME: u16 = 0x009b;
@@ -260,6 +261,21 @@ pub fn bootstrap_reply(room: &Station) -> Result<Vec<u8>, ProtocolError> {
     Ok(packet(FAMILY_BOOTSTRAP, 2, 898, &body))
 }
 
+/// The door's `005d/01` paging packet: the pre-call "ring" the door repeats
+/// (~10x at 100 ms in the capture) before any session setup. This is what
+/// actually makes the physical Pad ring; the body is a fixed 4-byte constant
+/// (`00 1e 00 00`) with no per-call fields.
+pub fn page_request() -> Vec<u8> {
+    packet(FAMILY_PAGE, OP_REQUEST, 36, &[0x00, 0x1e, 0x00, 0x00])
+}
+
+/// The door's `0098/01` bootstrap request: an empty-bodied query the Pad
+/// answers with `0098/02` ([`bootstrap_reply`]) describing itself. Sent once
+/// between the paging burst and the `00b7/01` session request.
+pub fn bootstrap_request() -> Vec<u8> {
+    packet(FAMILY_BOOTSTRAP, OP_REQUEST, 20, &[])
+}
+
 pub fn audio_packet(
     sequence: u16,
     pcm: &[u8],
@@ -426,6 +442,31 @@ mod builder_tests {
             }
         }
         None
+    }
+
+    fn captured_any(family: u16, opcode: u32) -> Option<Vec<u8>> {
+        for record in read_udp("testdata/pad.cap").unwrap() {
+            for raw in split_coalesced(&record.payload) {
+                if let Ok(msg) = Message::parse(raw) {
+                    if msg.family == family && msg.opcode == opcode {
+                        return Some(raw.to_vec());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn page_and_bootstrap_requests_reproduce_the_captured_setup() {
+        let page = captured_any(FAMILY_PAGE, OP_REQUEST).expect("005d/01 in capture");
+        assert_eq!(page_request(), page, "paging packet must match the wire");
+        let boot = captured_any(FAMILY_BOOTSTRAP, OP_REQUEST).expect("0098/01 in capture");
+        assert_eq!(
+            bootstrap_request(),
+            boot,
+            "bootstrap request must match the wire"
+        );
     }
 
     #[test]

@@ -153,14 +153,16 @@ The Pad's IP can be resolved from its room Station ID over the private UDP
 answers from its own address):
 
 ```sh
-cargo run -- resolve S00000000000 --broadcast 192.168.104.255
-# S00000000000 -> 192.168.104.108
-cargo run -- emit-door 192.168.104.255 --room-id S00000000000 --discover
+cargo run -- resolve S00000000000 --broadcast 192.168.124.255
+# S00000000000 -> 192.168.124.61
+cargo run -- emit-door --room-id S00000000000 --broadcast 192.168.124.255
 ```
 
-With `--discover`, `emit-door` treats its target as the broadcast address,
-resolves the Pad IP from `--room-id`, then rings it. `scripts/fake-pad-discovery.py`
-answers a discovery query for testing.
+Discovery is built into `emit-door`: omit the target and it resolves the Pad
+IP from `--room-id` over UDP 10008 (`--broadcast` sets where to ask, default
+`255.255.255.255`), then rings it. Pass an explicit `ip` / `ip:port` target to
+skip discovery. `scripts/fake-pad-discovery.py` answers a discovery query for
+testing.
 
 The reconstruction is checked in unit tests: `session_request` reproduces the
 captured ring byte for byte, and `jpeg_packets` reproduces the captured
