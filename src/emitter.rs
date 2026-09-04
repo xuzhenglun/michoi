@@ -75,6 +75,72 @@ pub fn door_packets(
     Ok(out)
 }
 
+/// Rewrite the station endpoints embedded in the captured packets so a real
+/// Pad recognises the call as its own. A real Pad keys on the room address in
+/// the PENGUIN0 body, not the UDP source, so at least the room IP usually has
+/// to match the target. All fields are optional; `None` keeps the captured
+/// value.
+#[derive(Debug, Clone, Default)]
+pub struct EndpointOverride {
+    pub door_id: Option<String>,
+    pub door_ip: Option<Ipv4Addr>,
+    pub room_id: Option<String>,
+    pub room_ip: Option<Ipv4Addr>,
+}
+
+impl EndpointOverride {
+    fn is_empty(&self) -> bool {
+        self.door_id.is_none()
+            && self.door_ip.is_none()
+            && self.room_id.is_none()
+            && self.room_ip.is_none()
+    }
+
+    /// Rewrite the 48-byte endpoint block (body offset 0, absolute 32..80) of
+    /// a session-family datagram in place. Non-session datagrams and short
+    /// ones are left untouched.
+    fn apply(&self, packet: &mut [u8]) {
+        if self.is_empty() || packet.len() < 80 || &packet[..8] != MAGIC {
+            return;
+        }
+        let family = u16::from_le_bytes([packet[8], packet[9]]);
+        if family != FAMILY_SESSION {
+            return;
+        }
+        let Ok(mut endpoints) = crate::protocol::Endpoints::parse(&packet[32..80]) else {
+            return;
+        };
+        if let Some(id) = &self.door_id {
+            endpoints.door.id = id.clone();
+        }
+        if let Some(ip) = self.door_ip {
+            endpoints.door.ip = ip;
+        }
+        if let Some(id) = &self.room_id {
+            endpoints.room.id = id.clone();
+        }
+        if let Some(ip) = self.room_ip {
+            endpoints.room.ip = ip;
+        }
+        if let Ok(block) = endpoints.pack() {
+            packet[32..80].copy_from_slice(&block);
+        }
+    }
+}
+
+/// Load the door datagrams and rewrite their endpoints for a specific Pad.
+pub fn door_packets_for(
+    path: impl AsRef<std::path::Path>,
+    door_ip: Ipv4Addr,
+    over: &EndpointOverride,
+) -> Result<Vec<WirePacket>> {
+    let mut packets = door_packets(path, door_ip)?;
+    for packet in &mut packets {
+        over.apply(&mut packet.payload);
+    }
+    Ok(packets)
+}
+
 /// Send the door datagrams to `target` over UDP, honoring capture timing
 /// divided by `speed`. With `repeat`, the whole call is sent again after that
 /// idle gap until the future is dropped.
@@ -117,8 +183,9 @@ pub async fn emit_capture(
     target: SocketAddr,
     speed: f64,
     repeat: Option<Duration>,
+    over: &EndpointOverride,
 ) -> Result<()> {
-    let packets = door_packets(path, door_ip)?;
+    let packets = door_packets_for(path, door_ip, over)?;
     emit_to(&packets, target, speed, repeat).await
 }
 
@@ -195,8 +262,9 @@ pub async fn run_emulator(
     speed: f64,
     repeat: Option<Duration>,
     player: Option<String>,
+    over: &EndpointOverride,
 ) -> Result<DoorObservation> {
-    let packets = door_packets(path, door_ip)?;
+    let packets = door_packets_for(path, door_ip, over)?;
     let bind = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), target.port());
     let socket = match UdpSocket::bind(bind).await {
         Ok(socket) => socket,
@@ -268,6 +336,24 @@ pub async fn run_emulator(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn endpoint_override_rewrites_room_in_place() {
+        let door = Ipv4Addr::new(192, 168, 124, 2);
+        let over = EndpointOverride {
+            room_ip: Some(Ipv4Addr::new(192, 168, 104, 108)),
+            room_id: Some("S00099999999".into()),
+            ..Default::default()
+        };
+        let packets = door_packets_for("testdata/pad.cap", door, &over).unwrap();
+        let ep = crate::protocol::Endpoints::parse(&packets[0].payload[32..80]).unwrap();
+        assert_eq!(ep.room.ip, Ipv4Addr::new(192, 168, 104, 108));
+        assert_eq!(ep.room.id, "S00099999999");
+        // Door side and packet length are unchanged.
+        assert_eq!(ep.door.ip, door);
+        let plain = door_packets("testdata/pad.cap", door).unwrap();
+        assert_eq!(packets[0].payload.len(), plain[0].payload.len());
+    }
 
     #[test]
     fn door_packets_start_at_the_session_request() {

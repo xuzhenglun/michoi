@@ -104,6 +104,16 @@ enum Commands {
         /// Fire and forget: do not listen for the Pad's replies.
         #[arg(long)]
         no_listen: bool,
+        /// Rewrite the room IP in the packet body (default: the target IP, so a
+        /// real Pad accepts the call); "keep" sends the captured value.
+        #[arg(long, value_name = "IP")]
+        room_ip: Option<String>,
+        /// Rewrite the room Station ID in the body (from the Pad's label/config).
+        #[arg(long, value_name = "ID")]
+        room_id: Option<String>,
+        /// Rewrite the door Station ID in the body.
+        #[arg(long, value_name = "ID")]
+        door_id: Option<String>,
     },
     /// Consume the legacy PAG1 WebSocket feed of an Agent (smoke test).
     Pag1Client {
@@ -224,6 +234,9 @@ async fn main() -> Result<()> {
             repeat_after,
             player,
             no_listen,
+            room_ip,
+            room_id,
+            door_id,
         } => {
             let target = match target.parse::<SocketAddr>() {
                 Ok(addr) => addr,
@@ -234,13 +247,33 @@ async fn main() -> Result<()> {
                     SocketAddr::new(ip.into(), pad_gateway::protocol::CONTROL_PORT)
                 }
             };
+            // Default: rewrite the body's room IP to the target so a real Pad
+            // accepts the call. `--room-ip keep` sends the captured value.
+            let room_ip = match room_ip.as_deref() {
+                Some("keep") => None,
+                Some(ip) => Some(
+                    ip.parse()
+                        .map_err(|_| anyhow::anyhow!("invalid --room-ip"))?,
+                ),
+                None => match target.ip() {
+                    std::net::IpAddr::V4(ip) => Some(ip),
+                    std::net::IpAddr::V6(_) => None,
+                },
+            };
+            let over = pad_gateway::emitter::EndpointOverride {
+                door_id,
+                door_ip: None,
+                room_id,
+                room_ip,
+            };
             let repeat = repeat_after.map(Duration::from_secs_f64);
             if no_listen {
-                pad_gateway::emitter::emit_capture(&pcap, door_ip, target, speed, repeat).await?;
+                pad_gateway::emitter::emit_capture(&pcap, door_ip, target, speed, repeat, &over)
+                    .await?;
             } else {
                 let player = player.map(|p| if p == "off" { String::new() } else { p });
                 let obs = pad_gateway::emitter::run_emulator(
-                    &pcap, door_ip, target, speed, repeat, player,
+                    &pcap, door_ip, target, speed, repeat, player, &over,
                 )
                 .await?;
                 println!(

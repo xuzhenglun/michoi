@@ -157,9 +157,16 @@ cargo run -- emit-door 127.0.0.1:10077 --speed 20 --player off
 # round trip: answered=true unlocks=1 hangups=0 voice_packets=1 voice_bytes=512
 ```
 
-The PENGUIN0 body still carries the captured station IDs and IPs; a real Pad
-that validates those may need them rewritten first (untested without
-hardware).
+The captured body carries the old station IDs and IPs, and a real Pad keys on
+the room address in the body, not the UDP source. So `emit-door` rewrites the
+body's room IP to the target IP by default; override with `--room-ip`,
+`--room-id` (from the Pad's label/config) and `--door-id` as needed, or
+`--room-ip keep` to send verbatim. Ringing a Pad at 192.168.104.108 is then:
+
+```sh
+cargo run -- emit-door 192.168.104.108
+# add --room-id S0000000XXXX if the Pad only answers to its own station id
+```
 
 ### Browser Pad
 

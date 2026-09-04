@@ -185,8 +185,13 @@ impl DoorStation {
         let capture = self.capture.clone();
         let door_ip = self.config.door_ip;
         self.runtime.spawn(async move {
+            // Rewrite the body's room IP to the target so a real Pad accepts it.
+            let over = crate::emitter::EndpointOverride {
+                room_ip: Some(target_v4(&target)),
+                ..Default::default()
+            };
             if let Err(error) =
-                crate::emitter::emit_capture(&capture, door_ip, target, 1.0, None).await
+                crate::emitter::emit_capture(&capture, door_ip, target, 1.0, None, &over).await
             {
                 tracing::warn!(%error, %target, "emitting door traffic failed");
             }
@@ -520,6 +525,13 @@ impl AgentMedia for DoorStation {
 }
 
 /// Read operator commands from stdin: `ring`, `hangup`, `quit`, `help`.
+fn target_v4(addr: &SocketAddr) -> Ipv4Addr {
+    match addr.ip() {
+        std::net::IpAddr::V4(ip) => ip,
+        std::net::IpAddr::V6(_) => Ipv4Addr::UNSPECIFIED,
+    }
+}
+
 /// Parse `ip` or `ip:port`, defaulting the port to the PENGUIN0 control port.
 fn parse_target(arg: &str) -> Option<SocketAddr> {
     if let Ok(addr) = arg.parse::<SocketAddr>() {
