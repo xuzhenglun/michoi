@@ -181,6 +181,9 @@ impl Default for CoexistenceConfig {
 #[serde(default)]
 pub struct SecurityConfig {
     pub unlock_cooldown_ms: u64,
+    /// Only let the remote owner of an answered call unlock. Off by default:
+    /// the door opens from the backend at any time, like from the Pad.
+    pub unlock_requires_answer: bool,
     pub virtual_unlock_ms: u64,
     pub max_call_seconds: u64,
 }
@@ -189,6 +192,7 @@ impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             unlock_cooldown_ms: 1_000,
+            unlock_requires_answer: false,
             virtual_unlock_ms: 1_500,
             max_call_seconds: 300,
         }

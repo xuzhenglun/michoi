@@ -386,7 +386,7 @@ def main():
     status, _, result = c.json("POST", "/v1/call/hangup", {"command_id": cid + "-h"})
     check(status == 200 and result["ok"], "hangup")
     status, _, result = c.json("POST", "/v1/call/unlock", {"command_id": cid + "-u3"})
-    check(status == 409 and result["error"] in ("unlock_not_allowed", "not_ringing"), "unlock after hangup -> 409")
+    check(status == 200 and result["ok"], "unlock while idle is allowed (Pad-like policy)")
 
     # SSE: resume after the ring event must replay what followed it.
     messages, _ = sse_stream(c, 3, last_event_id=ring_id)

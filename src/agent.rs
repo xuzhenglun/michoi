@@ -146,8 +146,12 @@ struct AgentState {
 
 impl AgentState {
     fn new(cooldown: Duration) -> Self {
+        Self::with_policy(cooldown, false)
+    }
+
+    fn with_policy(cooldown: Duration, unlock_requires_answer: bool) -> Self {
         Self {
-            call: CallMachine::new(cooldown),
+            call: CallMachine::with_policy(cooldown, unlock_requires_answer),
             results: HashMap::new(),
         }
     }
@@ -435,10 +439,16 @@ pub fn localhost(port: u16) -> SocketAddr {
 }
 
 #[cfg(all(target_os = "linux", feature = "linux-packet"))]
+pub struct LivePolicy {
+    pub cooldown: Duration,
+    pub unlock_requires_answer: bool,
+}
+
+#[cfg(all(target_os = "linux", feature = "linux-packet"))]
 pub async fn run_live_agent(
     listen: SocketAddr,
     intercom: IntercomConfig,
-    cooldown: Duration,
+    policy: LivePolicy,
 ) -> Result<()> {
     let _pad_mac = MacAddress::parse(
         intercom
@@ -457,7 +467,10 @@ pub async fn run_live_agent(
         "bridge_interface is not configured"
     );
     let socket = Arc::new(PacketSocket::open(&intercom.bridge_interface)?);
-    let state = Arc::new(Mutex::new(AgentState::new(cooldown)));
+    let state = Arc::new(Mutex::new(AgentState::with_policy(
+        policy.cooldown,
+        policy.unlock_requires_answer,
+    )));
     let (events, _) = broadcast::channel::<WireFrame>(512);
     let sequence = Arc::new(AtomicU32::new(1));
     let session = Arc::new(AtomicU64::new(1));

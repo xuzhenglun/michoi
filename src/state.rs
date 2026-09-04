@@ -45,11 +45,21 @@ pub struct PublicCallState {
 pub struct CallMachine {
     state: PublicCallState,
     unlock_cooldown: Duration,
+    /// When set, unlock is only accepted while the remote owner holds the
+    /// call. Off by default: the door can be opened at any time, like from
+    /// the physical Pad, subject to the cooldown.
+    unlock_requires_answer: bool,
     last_unlock: Option<Instant>,
 }
 
 impl CallMachine {
     pub fn new(unlock_cooldown: Duration) -> Self {
+        Self::with_policy(unlock_cooldown, false)
+    }
+
+    /// `unlock_requires_answer = true` restores the strict rule that only
+    /// the remote owner of an answered call may unlock.
+    pub fn with_policy(unlock_cooldown: Duration, unlock_requires_answer: bool) -> Self {
         Self {
             state: PublicCallState {
                 session_id: 0,
@@ -60,6 +70,7 @@ impl CallMachine {
                 unlocks: 0,
             },
             unlock_cooldown,
+            unlock_requires_answer,
             last_unlock: None,
         }
     }
@@ -101,7 +112,9 @@ impl CallMachine {
     }
 
     pub fn unlock(&mut self, now: Instant) -> Result<(), StateError> {
-        if self.state.phase != CallPhase::Connected || self.state.owner != Owner::Remote {
+        if self.unlock_requires_answer
+            && (self.state.phase != CallPhase::Connected || self.state.owner != Owner::Remote)
+        {
             return Err(StateError::UnlockNotAllowed);
         }
         if self

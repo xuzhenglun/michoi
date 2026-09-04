@@ -191,7 +191,7 @@
     const ringing = state.phase === 'ringing';
     const mine = state.phase === 'connected' && state.owner === 'remote';
     el.answer.disabled = !(state.online && ringing);
-    el.unlock.disabled = !(state.online && (ringing || mine));
+    el.unlock.disabled = !state.online;
     el.hangup.disabled = !(state.online && (ringing || mine));
     el.talk.disabled = !(state.online && mine);
     document.title = ringing ? '🔔 门口有人呼叫' : '门口机';
@@ -294,12 +294,7 @@
   }
   el.answer.onclick = async () => { try { await command('claim'); logLine('已接听'); } catch (e) {} };
   el.hangup.onclick = async () => { try { await command('hangup'); logLine('已挂断'); } catch (e) {} };
-  el.unlock.onclick = async () => {
-    try {
-      if (state.phase === 'ringing') { await command('claim'); logLine('已接听'); }
-      await command('unlock'); toast('已开锁'); logLine('已开锁');
-    } catch (e) {}
-  };
+  el.unlock.onclick = async () => { try { await command('unlock'); toast('已开锁'); logLine('已开锁'); } catch (e) {} };
 
   // ---------- Events (SSE) ----------
   let source = null;

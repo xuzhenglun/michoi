@@ -151,20 +151,22 @@ async fn run_agent(path: PathBuf, standalone: bool) -> Result<()> {
     let config = pad_gateway::config::Config::load(path)?;
     #[cfg(all(target_os = "linux", feature = "linux-packet"))]
     {
-        use pad_gateway::agent::run_live_agent;
-        let cooldown = Duration::from_millis(config.security.unlock_cooldown_ms);
+        use pad_gateway::agent::{run_live_agent, LivePolicy};
+        let policy = LivePolicy {
+            cooldown: Duration::from_millis(config.security.unlock_cooldown_ms),
+            unlock_requires_answer: config.security.unlock_requires_answer,
+        };
         if standalone {
             let url = format!("ws://{}", config.agent.listen);
             let listen = config.agent.listen;
             let intercom = config.intercom;
-            let agent =
-                tokio::spawn(async move { run_live_agent(listen, intercom, cooldown).await });
+            let agent = tokio::spawn(async move { run_live_agent(listen, intercom, policy).await });
             tokio::time::sleep(Duration::from_millis(50)).await;
             let backend = run_backend(&url, false).await;
             agent.abort();
             backend
         } else {
-            run_live_agent(config.agent.listen, config.intercom, cooldown).await
+            run_live_agent(config.agent.listen, config.intercom, policy).await
         }
     }
     #[cfg(not(all(target_os = "linux", feature = "linux-packet")))]

@@ -94,8 +94,24 @@ fn replay_transport_is_self_describing() {
 }
 
 #[test]
-fn remote_must_own_call_before_unlock() {
+fn unlock_is_allowed_any_time_with_cooldown() {
     let mut state = CallMachine::new(Duration::from_secs(1));
+    let now = Instant::now();
+    state.unlock(now).unwrap();
+    assert_eq!(state.unlock(now), Err(StateError::UnlockCooldown));
+    state.start_call(7);
+    assert_eq!(
+        state.unlock(now + Duration::from_secs(2)),
+        Ok(()),
+        "ringing calls can be unlocked without answering"
+    );
+    state.pad_answer().unwrap();
+    assert_eq!(state.unlock(now + Duration::from_secs(4)), Ok(()));
+}
+
+#[test]
+fn strict_policy_requires_remote_owner_before_unlock() {
+    let mut state = CallMachine::with_policy(Duration::from_secs(1), true);
     state.start_call(7);
     assert_eq!(
         state.unlock(Instant::now()),

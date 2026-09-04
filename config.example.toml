@@ -41,5 +41,7 @@ owner_timeout_ms = 2000
 
 [security]
 unlock_cooldown_ms = 1000
+# true = only the remote owner of an answered call may unlock; false = any time (Pad-like).
+unlock_requires_answer = false
 virtual_unlock_ms = 1500
 max_call_seconds = 300

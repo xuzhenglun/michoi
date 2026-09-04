@@ -179,9 +179,11 @@ paths:
       tags: [call]
       summary: Open the door
       description: |
-        Accepted only while the remote owner (the caller of `claim`) has the
-        current call, and at most once per cooldown period. The Agent never
-        unlocks for a call the physical Pad answered.
+        Opens the door at any time, like the physical Pad: while idle, while
+        the door is ringing (no `claim` needed) or during a call. Rate limited
+        by the unlock cooldown (`429`). With `security.unlock_requires_answer`
+        enabled on the Agent the strict rule applies instead and only the
+        remote owner of an answered call may unlock (`409`).
       operationId: unlockDoor
       requestBody:
         $ref: "#/components/requestBodies/Command"

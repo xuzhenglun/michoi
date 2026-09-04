@@ -70,9 +70,12 @@ and served at `/openapi.yaml`).
 - **Authentication**: `Authorization: Bearer <token>` (`agent.token`);
   an empty token disables it for development.
 - **Agent-side validation**: the Agent never forwards a command blindly.
-  `claim` needs a ringing call the Pad has not answered, `unlock` needs the
-  remote owner to hold the call and respects the cooldown, `hangup` needs an
-  active call; rejections come back as `409` / `429` with a `CallError`.
+  `claim` needs a ringing call the Pad has not answered, `hangup` needs an
+  active call, `unlock` is rate limited by the cooldown and, like on the
+  physical Pad, allowed at any time: idle, ringing without answering, or in
+  a call (`security.unlock_requires_answer = true` restores the strict
+  remote-owner-only rule). Rejections come back as `409` / `429` with a
+  `CallError`.
 - **Data plane**: RTSP (RTP/JPEG + PCMU, no re-encoding) is reported by
   `GET /v1/media`; until it lands, `GET /v1/snapshot.jpg` (with
   `X-Frame-Age-Ms`) and the transitional `POST /v1/talk` (PCM S16LE 8 kHz,
@@ -103,8 +106,8 @@ open http://127.0.0.1:8080/swagger
 
 The Agent serves a self-contained page at `/pad` (also `/`) that behaves
 like the physical room station: ring alert with a Web Audio ringtone, live
-door picture and sound, answer, unlock (answers first when the door is still
-ringing), hang up, and hold-to-talk. It has no external assets and no build
+door picture and sound, answer, unlock (at any time, no need to answer
+first), hang up, and hold-to-talk. It has no external assets and no build
 step; the token is stored in the browser and appended as `?token=` where
 headers are impossible (`EventSource`, `<img>`, WebSocket).
 
