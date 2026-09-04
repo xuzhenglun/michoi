@@ -87,8 +87,6 @@ impl Default for IntercomConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {
-    /// Legacy PAG1 WebSocket listener.
-    pub listen: SocketAddr,
     /// HTTP control plane (REST + SSE, see docs/openapi.yaml).
     pub http_listen: SocketAddr,
     /// Bearer token for the control plane; empty disables authentication.
@@ -103,7 +101,6 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9443),
             http_listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
             token: String::new(),
             swagger: false,

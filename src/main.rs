@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use pad_gateway::agent::{replay_timeline, run_backend, run_fake_agent};
+use pad_gateway::agent::replay_timeline;
 use sha2::{Digest, Sha256};
 
 #[derive(Parser)]
@@ -21,22 +21,20 @@ enum Commands {
         #[arg(default_value = "testdata/pad.cap")]
         pcap: PathBuf,
     },
-    /// Replay a pcap as an Agent: legacy PAG1 WebSocket plus, with --http,
-    /// the HTTP control plane described in docs/openapi.yaml.
+    /// Replay a pcap as an Agent over the HTTP control plane (REST + SSE),
+    /// described in docs/openapi.yaml.
     FakeAgent {
         #[arg(default_value = "testdata/pad.cap")]
         pcap: PathBuf,
-        #[arg(long, default_value = "127.0.0.1:9443")]
-        listen: SocketAddr,
         #[arg(long, default_value_t = 1.0)]
         speed: f64,
         /// Replay the call again after this many idle seconds instead of
-        /// closing the connection after one pass.
+        /// staying idle after one pass.
         #[arg(long, value_name = "SECONDS")]
         repeat_after: Option<f64>,
-        /// Also serve the HTTP control plane (REST + SSE) on this address.
-        #[arg(long, value_name = "ADDR")]
-        http: Option<SocketAddr>,
+        /// Serve the HTTP control plane (REST + SSE) on this address.
+        #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:8080")]
+        http: SocketAddr,
         /// Bearer token for the HTTP control plane.
         #[arg(long)]
         token: Option<String>,
@@ -139,20 +137,11 @@ enum Commands {
         #[arg(long, default_value_t = 3.0)]
         timeout: f64,
     },
-    /// Consume the legacy PAG1 WebSocket feed of an Agent (smoke test).
-    Pag1Client {
-        #[arg(long, default_value = "ws://127.0.0.1:9443")]
-        agent: String,
-        /// Run answer/unlock/hangup automatically on the first call.
-        #[arg(long)]
-        scripted: bool,
-    },
     /// Print the bridge-family nftables rules for manual/automatic coexistence.
     NftRules { config: PathBuf },
-    /// Capture the real bridge and expose it to remote backends (Linux only).
+    /// Capture the real bridge and expose it to backends over the HTTP control
+    /// plane (REST + SSE, see docs/openapi.yaml). Linux only.
     Agent { config: PathBuf },
-    /// Run the real Agent and the PAG1 smoke client together (Linux only).
-    Standalone { config: PathBuf },
     /// Validate and print a TOML configuration.
     CheckConfig { path: PathBuf },
 }
@@ -180,7 +169,6 @@ async fn main() -> Result<()> {
         }
         Commands::FakeAgent {
             pcap,
-            listen,
             speed,
             repeat_after,
             http,
@@ -191,32 +179,25 @@ async fn main() -> Result<()> {
             history_max_kib,
         } => {
             let repeat = repeat_after.map(Duration::from_secs_f64);
-            if let Some(http) = http {
-                let agent = pad_gateway::replay_agent::ReplayAgent::spawn(
-                    &pcap,
-                    speed,
-                    Duration::from_secs(1),
-                    repeat,
-                    Duration::from_secs(history_secs),
-                    (history_max_kib * 1024) as usize,
-                )?;
-                let mut config = pad_gateway::agent_server::ServerConfig {
-                    listen: http,
-                    token: token.filter(|t| !t.is_empty()),
-                    swagger,
-                    ..Default::default()
-                };
-                if let Some(seconds) = events_lifetime {
-                    let lifetime = Duration::from_secs(seconds);
-                    config.event_stream_lifetime = (lifetime, lifetime);
-                }
-                tokio::spawn(async move {
-                    if let Err(error) = pad_gateway::agent_server::serve(config, agent).await {
-                        tracing::error!(%error, "control plane stopped");
-                    }
-                });
+            let agent = pad_gateway::replay_agent::ReplayAgent::spawn(
+                &pcap,
+                speed,
+                Duration::from_secs(1),
+                repeat,
+                Duration::from_secs(history_secs),
+                (history_max_kib * 1024) as usize,
+            )?;
+            let mut config = pad_gateway::agent_server::ServerConfig {
+                listen: http,
+                token: token.filter(|t| !t.is_empty()),
+                swagger,
+                ..Default::default()
+            };
+            if let Some(seconds) = events_lifetime {
+                let lifetime = Duration::from_secs(seconds);
+                config.event_stream_lifetime = (lifetime, lifetime);
             }
-            run_fake_agent(listen, pcap, speed, Duration::from_secs(1), repeat).await?;
+            pad_gateway::agent_server::serve(config, agent).await?;
         }
         Commands::Door {
             pcap,
@@ -322,7 +303,6 @@ async fn main() -> Result<()> {
             .await?;
             println!("{room_id} -> {ip}");
         }
-        Commands::Pag1Client { agent, scripted } => run_backend(&agent, scripted).await?,
         Commands::CheckConfig { path } => {
             let config = pad_gateway::config::Config::load(path)?;
             println!("{config:#?}");
@@ -331,13 +311,12 @@ async fn main() -> Result<()> {
             let config = pad_gateway::config::Config::load(config)?;
             print!("{}", pad_gateway::firewall::nft_rules(&config)?);
         }
-        Commands::Agent { config } => run_agent(config, false).await?,
-        Commands::Standalone { config } => run_agent(config, true).await?,
+        Commands::Agent { config } => run_agent(config).await?,
     }
     Ok(())
 }
 
-async fn run_agent(path: PathBuf, standalone: bool) -> Result<()> {
+async fn run_agent(path: PathBuf) -> Result<()> {
     let config = pad_gateway::config::Config::load(path)?;
     #[cfg(all(target_os = "linux", feature = "linux-packet"))]
     {
@@ -346,22 +325,19 @@ async fn run_agent(path: PathBuf, standalone: bool) -> Result<()> {
             cooldown: Duration::from_millis(config.security.unlock_cooldown_ms),
             unlock_requires_answer: config.security.unlock_requires_answer,
         };
-        if standalone {
-            let url = format!("ws://{}", config.agent.listen);
-            let listen = config.agent.listen;
-            let intercom = config.intercom;
-            let agent = tokio::spawn(async move { run_live_agent(listen, intercom, policy).await });
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let backend = run_backend(&url, false).await;
-            agent.abort();
-            backend
-        } else {
-            run_live_agent(config.agent.listen, config.intercom, policy).await
-        }
+        let server = pad_gateway::agent_server::ServerConfig {
+            listen: config.agent.http_listen,
+            token: Some(config.agent.token.clone()).filter(|t| !t.is_empty()),
+            swagger: config.agent.swagger,
+            ..Default::default()
+        };
+        let history = Duration::from_secs(config.media.history_secs);
+        let history_max_bytes = (config.media.history_max_kib * 1024) as usize;
+        run_live_agent(server, config.intercom, policy, history, history_max_bytes).await
     }
     #[cfg(not(all(target_os = "linux", feature = "linux-packet")))]
     {
-        let _ = (config, standalone);
+        let _ = config;
         anyhow::bail!("real Agent requires Linux and --features linux-packet")
     }
 }

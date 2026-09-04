@@ -29,8 +29,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { version = "0.2", optional = true }
-# 32-bit MIPS (mipsel router build) has no native AtomicU64.
-portable-atomic = "1"
 
 [profile.release]
 opt-level = "z"

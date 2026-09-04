@@ -23,12 +23,11 @@ The complete evidence-backed wire description is in
 | Exact answer/unlock/hangup encoders | implemented |
 | First-answer state machine, unlock authorization, cooldown, idempotency | implemented |
 | pcap replay Agent with capture timing (`fake-agent`) | implemented |
-| Agent interface (`AgentControl` / `AgentMedia` traits) | implemented; used by the replay Agent and the HTTP server |
-| HTTP control plane: REST + SSE, negotiation, bearer auth, Swagger UI | implemented and verified end to end against the replay Agent |
+| Agent interface (`AgentControl` / `AgentMedia` traits) | implemented; used by the replay Agent, the live Agent, and the HTTP server |
+| HTTP control plane: REST + SSE, negotiation, bearer auth, Swagger UI | the only backend transport; verified end to end against the replay Agent |
 | Pre-roll media buffer (configurable seconds / bytes) | implemented |
 | RTSP data plane (RTP/JPEG + PCMU, no re-encoding) | designed and validated with the captured frames; **not implemented yet** |
-| Legacy PAG1 binary WebSocket transport | implemented; kept until the live Agent moves to the HTTP/RTSP interface |
-| Linux AF_PACKET capture and raw control injection | implemented; needs authorized on-device validation |
+| Linux AF_PACKET capture Agent (`LiveAgent`) over HTTP, with raw control injection | implemented; needs authorized on-device validation |
 | Manual Pad blocking rule generator | implemented |
 | Automatic NFQUEUE first-answer arbitration | **not complete; do not deploy automatic mode** |
 
@@ -87,9 +86,11 @@ and served at `/openapi.yaml`).
   (currently held); `history_secs = 0` disables it.
 
 The Rust side is split by interface: `agent_api` (the traits every backend
-uses), `replay_agent` (in-process pcap replay), and `agent_server` (the HTTP
-adapter over any implementation, no HTTP crate needed). Standalone builds
-call the traits directly; distributed builds go through HTTP.
+uses), `replay_agent` (in-process pcap replay), `agent` (`LiveAgent`, the Linux
+AF_PACKET capture Agent), and `agent_server` (the HTTP adapter over any
+implementation, no HTTP crate needed). Standalone builds call the traits
+directly; distributed builds go through HTTP. The HTTP control plane is the
+only backend transport.
 
 Run the replay Agent with the control plane and Swagger UI:
 
@@ -259,17 +260,10 @@ nft delete table bridge pad_gateway
 ```
 
 AF_PACKET requires root or `CAP_NET_RAW`. Keep UDP 10000/10008 private and do
-not expose the plain development WebSocket or an unauthenticated control
-plane outside a trusted LAN/VPN. The live Agent accepts packets only when
-configured source MAC, IP, station IDs and endpoint IPs all match. A real
-unlock is rejected unless the remote owner won the current call.
-
-## Legacy PAG1 WebSocket
-
-The live Agent and `fake-agent` still speak the private PAG1 framing on
-`agent.listen` (default `127.0.0.1:9443`); `pag1-client --scripted` is its
-smoke test (claim, unlock, hangup on the first call). It goes away once the
-live Agent is served through the HTTP/RTSP interface.
+not expose an unauthenticated control plane outside a trusted LAN/VPN. The live
+Agent accepts packets only when configured source MAC, IP, station IDs and
+endpoint IPs all match. A real unlock is rejected unless the remote owner won
+the current call.
 
 ## Legacy Python tools
 

@@ -117,7 +117,6 @@ impl ReplayAgent {
                         self.history.push_audio(&chunk);
                         let _ = self.audio.send(chunk);
                     }
-                    _ => {}
                 }
             }
             pass += 1;

@@ -40,8 +40,10 @@ Pad 未接听时成功；unlock 只在远程已接听时允许，默认 1 秒冷
   （默认 ffplay）放出来。与 `replay_agent` 一样实现同一组 trait，对后端不可区分。
 - `agent_server`：把任意实现暴露成 HTTP 控制面的适配器，手写 HTTP/1.1，不引入
   HTTP 库。
-- 真实抓包 Agent（`agent::run_live_agent` + `bridge`）目前仍走旧的 PAG1
-  WebSocket，下一步接到同一组 trait 上。
+- `agent::LiveAgent`（`run_live_agent` + `bridge`，仅 Linux）：AF_PACKET 抓桥、
+  驱动通话状态机、广播门口视频/音频，并在收到后端命令时注入 claim/unlock/hangup、
+  对讲音频注入 Pad→门口机方向。它实现同一组 trait，由 `agent_server` 用与 replay
+  完全相同的方式对外服务。控制面只有 HTTP + SSE，没有别的后端传输。
 
 standalone 部署时 Backend 直接调用 trait（函数调用和 channel，无序列化）；分离
 部署时经 HTTP。两种部署的失败模型一致：事件有 seq 并可续订，命令有 command_id，
@@ -75,24 +77,8 @@ RTSP，视频用 RFC 2435 RTP/JPEG，音频 PCMU/L16，RTP 时间戳加 RTCP SR 
 预录缓冲：`media.history_secs` 秒（`history_max_kib` 兜底），开流时可从几秒前
 起播，事件录像有前置片段；`GET /v1/media` 报告配置窗口和当前持有的跨度。
 
-## PAG1 Agent 协议（旧，待下线）
-
-每个 WebSocket binary message 恰好是一帧：
-
-| Offset | Size | 编码 |
-|---:|---:|---|
-| 0 | 4 | `PAG1` |
-| 4 | 1 | version = 1 |
-| 5 | 1 | kind: event/command/result/jpeg/PCM |
-| 6 | 2 | flags, big-endian |
-| 8 | 8 | session ID, big-endian |
-| 16 | 4 | sequence, big-endian |
-| 20 | 8 | monotonic timestamp µs, big-endian |
-| 28 | 4 | payload length, big-endian |
-| 32 | N | CBOR control or raw media |
-
-视频帧为完整 JPEG；门口音频为原始 PCM S16LE/8 kHz/mono。慢消费者通过有界广播
-队列丢视频，不阻塞门禁收包。
+门口视频为完整 JPEG，门口音频为原始 PCM S16LE/8 kHz/mono，都经有界广播队列
+fan-out，慢消费者丢帧、不阻塞抓包。
 
 ## MediaEngine
 
@@ -129,10 +115,10 @@ reset 包的构造已单测，但 Pad 是否认中途注入的门口机 hangup �
 
 ## 当前实现边界
 
-已有：协议解析、pcap 等时回放、PAG1 WebSocket Agent、真实 AF_PACKET 捕获、控制
-包注入、手动 nft 规则、first-answer 状态机、媒体抽象、接口层、HTTP 控制面、
-预录缓冲。
+已有：协议解析、pcap 等时回放（`ReplayAgent`）、真实 AF_PACKET 捕获 Agent
+（`LiveAgent`，Linux）、控制包注入、手动 nft 规则、first-answer 状态机、媒体抽象、
+接口层、唯一的 HTTP 控制面（REST + SSE）、预录缓冲。回放与实机走同一组 trait 和
+同一个 `agent_server`，对后端不可区分。
 
-待做（按顺序）：RTSP 数据面；远程 Agent 客户端（HTTP + RTSP 实现同一组 trait）；
-真实 Agent 接到 trait 和 HTTP 服务上并下线 PAG1；Matter / HomeKit 后端（当前
-在仓库外的 `wip/` 中，等 Agent 接口稳定后回迁）。
+待做（按顺序）：RTSP 数据面；远程 Agent 客户端（HTTP + RTSP 实现同一组 trait）供
+分离部署；Matter / HomeKit 后端（当前在仓库外的 `wip/` 中，等 Agent 接口稳定后回迁）。

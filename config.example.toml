@@ -14,9 +14,8 @@ control_port = 10000
 discovery_port = 10008
 
 [agent]
-# Legacy PAG1 WebSocket. Use 0.0.0.0 only with WSS/mTLS or an isolated trusted network.
-listen = "127.0.0.1:9443"
 # HTTP control plane (REST + Server-Sent Events), see docs/openapi.yaml.
+# Use 0.0.0.0 only with a bearer token on a trusted network.
 http_listen = "127.0.0.1:8080"
 # Bearer token required on every control-plane request; empty = no auth (development only).
 token = ""

@@ -7,7 +7,7 @@ use pad_gateway::protocol::{
     FAMILY_SESSION, MEDIA_AUDIO, OP_ANSWER, OP_MEDIA, OP_UNLOCK,
 };
 use pad_gateway::state::{CallMachine, CallPhase, Owner, StateError};
-use pad_gateway::transport::{AgentEvent, FrameKind, WireFrame};
+use pad_gateway::transport::{AgentEvent, FrameKind};
 
 #[test]
 fn captured_session_and_media_are_decoded() {
@@ -66,14 +66,13 @@ fn production_encoder_round_trips() {
 }
 
 #[test]
-fn replay_transport_is_self_describing() {
+fn replay_timeline_decodes_events_and_media() {
     let timeline = replay_timeline("testdata/pad.cap").unwrap();
     assert_eq!(timeline.len(), 334);
-    let encoded = timeline[0].frame.encode();
-    let decoded = WireFrame::decode(&encoded).unwrap();
-    assert_eq!(decoded.kind, FrameKind::Event);
+    // The first frame is a control event that decodes back to CallStarted.
+    assert_eq!(timeline[0].frame.kind, FrameKind::Event);
     assert!(matches!(
-        decoded.decode_cbor::<AgentEvent>().unwrap(),
+        timeline[0].frame.decode_cbor::<AgentEvent>().unwrap(),
         AgentEvent::CallStarted { .. }
     ));
     assert_eq!(
