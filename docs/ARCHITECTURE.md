@@ -72,6 +72,9 @@ standalone 部署时 Backend 直接调用 trait（函数调用和 channel，无�
   需增加候选。
 - 鉴权：`Authorization: Bearer <token>`；空 token 关闭鉴权，仅开发用。
 - `/swagger` 由开关控制，页面从 CDN 加载 Swagger UI 读取本机 `/openapi.yaml`。
+- 内置网页 Pad（`/`、`/pad`）由 `agent.web_ui` 开关控制，默认开：不部署任何
+  Matter/HAP 后端时也有一个跨平台可用的界面；headless 部署可关。它只是控制面的
+  一个普通客户端，没有任何特权通道。
 
 ## 数据面（设计已定，待实现）
 

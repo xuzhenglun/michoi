@@ -93,6 +93,9 @@ pub struct AgentConfig {
     pub token: String,
     /// Serve Swagger UI at /swagger for testing.
     pub swagger: bool,
+    /// Serve the built-in browser Pad at `/`: a cross-platform fallback UI
+    /// when no Matter/HAP backend is deployed. Off for headless deployments.
+    pub web_ui: bool,
     pub tls_cert: Option<PathBuf>,
     pub tls_key: Option<PathBuf>,
     pub backend_ca: Option<PathBuf>,
@@ -104,6 +107,7 @@ impl Default for AgentConfig {
             http_listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
             token: String::new(),
             swagger: false,
+            web_ui: true,
             tls_cert: None,
             tls_key: None,
             backend_ca: None,

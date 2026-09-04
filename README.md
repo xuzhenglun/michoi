@@ -202,7 +202,9 @@ control port. Add `--discover` to `pad-agent` to also answer UDP 10008 so
 
 ### Browser Pad
 
-The Agent serves a self-contained page at `/pad` (also `/`) that behaves
+The Agent serves (optionally: on by default, off with `web_ui = false` in the
+config or `--no-web-ui` on the demo subcommands) a self-contained page at
+`/pad` (also `/`) that behaves
 like the physical room station: ring alert with a Web Audio ringtone, live
 door picture and sound, answer, unlock (at any time, no need to answer
 first), hang up, and hold-to-talk. It has no external assets and no build

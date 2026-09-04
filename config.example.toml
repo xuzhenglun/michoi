@@ -21,6 +21,9 @@ http_listen = "127.0.0.1:8080"
 token = ""
 # Serve Swagger UI at /swagger for manual testing.
 swagger = false
+# Serve the built-in browser Pad at / : a cross-platform fallback UI when no
+# Matter/HAP backend is deployed. Set false for headless deployments.
+web_ui = true
 
 [media]
 # lite never decodes untrusted JPEG on the MT7628.

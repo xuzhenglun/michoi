@@ -380,7 +380,8 @@ paths:
         the physical room station: ring alert, live picture and sound,
         answer, unlock, hang up and hold-to-talk. It stores the bearer token
         in the browser and uses `?token=` for `EventSource`, `<img>` and the
-        talk WebSocket. `/` redirects here.
+        talk WebSocket. `/` redirects here. Optional: served only while the
+        Agent's web UI is enabled (`agent.web_ui`, on by default); 404 otherwise.
       responses:
         "200":
           description: HTML page

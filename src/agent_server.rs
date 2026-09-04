@@ -46,6 +46,9 @@ pub struct ServerConfig {
     pub token: Option<String>,
     /// Serve `/swagger` (Swagger UI loaded from a CDN).
     pub swagger: bool,
+    /// Serve the built-in browser Pad at `/` and `/pad`: a cross-platform
+    /// fallback UI when no other backend is deployed. Off for headless use.
+    pub web_ui: bool,
     /// Range after which an event stream is closed so clients reconnect.
     pub event_stream_lifetime: (Duration, Duration),
 }
@@ -56,6 +59,7 @@ impl Default for ServerConfig {
             listen: "127.0.0.1:8080".parse().unwrap(),
             token: None,
             swagger: false,
+            web_ui: true,
             event_stream_lifetime: (Duration::from_secs(300), Duration::from_secs(600)),
         }
     }
@@ -76,6 +80,7 @@ pub async fn serve<A: AgentControl + AgentMedia>(
         listen = %config.listen,
         auth = config.token.is_some(),
         swagger = config.swagger,
+        web_ui = config.web_ui,
         "Agent control plane listening"
     );
     if config.token.is_none() {
@@ -481,8 +486,12 @@ async fn route<A: AgentControl + AgentMedia>(
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/openapi.yaml") => Response::new(200, "application/yaml", OPENAPI_YAML.into()),
         ("GET", "/") | ("GET", "/pad") => {
-            Response::new(200, "text/html; charset=utf-8", PAD_HTML.into())
-                .header("Cache-Control", "no-cache")
+            if config.web_ui {
+                Response::new(200, "text/html; charset=utf-8", PAD_HTML.into())
+                    .header("Cache-Control", "no-cache")
+            } else {
+                Response::error(404, "not_found", "the browser Pad is disabled on this server")
+            }
         }
         ("GET", "/swagger") => {
             if config.swagger {

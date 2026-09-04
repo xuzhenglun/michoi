@@ -41,6 +41,9 @@ enum Commands {
         /// Serve Swagger UI at /swagger on the HTTP control plane.
         #[arg(long)]
         swagger: bool,
+        /// Do not serve the built-in browser Pad at / and /pad (headless).
+        #[arg(long)]
+        no_web_ui: bool,
         /// Close event streams after this many seconds (default: random 300-600).
         #[arg(long, value_name = "SECONDS")]
         events_lifetime: Option<u64>,
@@ -64,6 +67,9 @@ enum Commands {
         /// Serve Swagger UI at /swagger.
         #[arg(long)]
         swagger: bool,
+        /// Do not serve the built-in browser Pad at / and /pad (headless).
+        #[arg(long)]
+        no_web_ui: bool,
         /// Frames per second at which the saved camera loops.
         #[arg(long, default_value_t = 8)]
         loop_fps: u16,
@@ -175,6 +181,9 @@ enum Commands {
         /// Serve Swagger UI at /swagger.
         #[arg(long)]
         swagger: bool,
+        /// Do not serve the built-in browser Pad at / and /pad (headless).
+        #[arg(long)]
+        no_web_ui: bool,
         /// Also answer UDP 10008 discovery for --room-id.
         #[arg(long)]
         discover: bool,
@@ -222,6 +231,7 @@ async fn main() -> Result<()> {
             http,
             token,
             swagger,
+            no_web_ui,
             events_lifetime,
             history_secs,
             history_max_kib,
@@ -239,6 +249,7 @@ async fn main() -> Result<()> {
                 listen: http,
                 token: token.filter(|t| !t.is_empty()),
                 swagger,
+                web_ui: !no_web_ui,
                 ..Default::default()
             };
             if let Some(seconds) = events_lifetime {
@@ -252,6 +263,7 @@ async fn main() -> Result<()> {
             http,
             token,
             swagger,
+            no_web_ui,
             loop_fps,
             on_unlock,
             on_answer,
@@ -279,6 +291,7 @@ async fn main() -> Result<()> {
                 listen: http,
                 token: token.filter(|t| !t.is_empty()),
                 swagger,
+                web_ui: !no_web_ui,
                 ..Default::default()
             };
             michoi::agent_server::serve(server, station).await?;
@@ -379,6 +392,7 @@ async fn main() -> Result<()> {
             room_ip,
             token,
             swagger,
+            no_web_ui,
             discover,
             history_secs,
             history_max_kib,
@@ -387,6 +401,7 @@ async fn main() -> Result<()> {
                 listen: http,
                 token: token.filter(|t| !t.is_empty()),
                 swagger,
+                web_ui: !no_web_ui,
                 ..Default::default()
             };
             michoi::socket_agent::run_socket_agent(
@@ -421,6 +436,7 @@ async fn run_agent(path: PathBuf) -> Result<()> {
             listen: config.agent.http_listen,
             token: Some(config.agent.token.clone()).filter(|t| !t.is_empty()),
             swagger: config.agent.swagger,
+            web_ui: config.agent.web_ui,
             ..Default::default()
         };
         let history = Duration::from_secs(config.media.history_secs);
