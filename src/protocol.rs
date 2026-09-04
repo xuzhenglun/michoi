@@ -80,6 +80,9 @@ pub struct Endpoints {
 }
 
 impl Endpoints {
+    /// Synthetic default identities for demos and tests. The real
+    /// installation's station IDs are private and exist only in the
+    /// untracked capture (`testdata/pad.cap`), never in the repository.
     pub fn captured() -> Self {
         Self {
             door: Station::new("M00000000000", Ipv4Addr::new(192, 168, 124, 2)),
@@ -431,6 +434,12 @@ mod builder_tests {
     use super::*;
     use crate::pcap::read_udp;
 
+    /// The capture is private and not in git; tests that need it skip when
+    /// it is absent so the repository stays testable without it.
+    fn capture_present() -> bool {
+        std::path::Path::new("testdata/pad.cap").exists()
+    }
+
     fn captured(opcode: u32) -> Option<Vec<u8>> {
         for record in read_udp("testdata/pad.cap").unwrap() {
             for raw in split_coalesced(&record.payload) {
@@ -459,6 +468,10 @@ mod builder_tests {
 
     #[test]
     fn page_and_bootstrap_requests_reproduce_the_captured_setup() {
+        if !capture_present() {
+            eprintln!("skipped: testdata/pad.cap is not present");
+            return;
+        }
         let page = captured_any(FAMILY_PAGE, OP_REQUEST).expect("005d/01 in capture");
         assert_eq!(page_request(), page, "paging packet must match the wire");
         let boot = captured_any(FAMILY_BOOTSTRAP, OP_REQUEST).expect("0098/01 in capture");
@@ -471,6 +484,10 @@ mod builder_tests {
 
     #[test]
     fn session_request_reproduces_the_captured_ring() {
+        if !capture_present() {
+            eprintln!("skipped: testdata/pad.cap is not present");
+            return;
+        }
         let capture = captured(OP_REQUEST).expect("00b7/01 in capture");
         let endpoints = Endpoints::parse(&capture[32..80]).unwrap();
         let built = session_request(&endpoints).unwrap();
@@ -482,6 +499,10 @@ mod builder_tests {
 
     #[test]
     fn jpeg_packets_match_the_captured_fragmentation() {
+        if !capture_present() {
+            eprintln!("skipped: testdata/pad.cap is not present");
+            return;
+        }
         // Reassemble the first captured door frame, then re-fragment it.
         let mut reasm = JpegReassembler::default();
         let mut first_seq = None;

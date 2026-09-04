@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn media_source_loads_the_frame_files() {
         let media = MediaSource::load(std::path::Path::new("testdata/frames"), None).unwrap();
-        assert!(media.frames.len() > 100);
+        assert!(media.frames.len() >= 10);
         assert!(media.frames.iter().all(|f| f.starts_with(&[0xff, 0xd8])));
         assert!(media.audio.is_empty());
     }

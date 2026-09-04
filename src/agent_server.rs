@@ -1060,7 +1060,7 @@ const SWAGGER_HTML: &str = r##"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>pad-gateway Agent API</title>
+<title>michoi Agent API</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
 </head>
 <body>

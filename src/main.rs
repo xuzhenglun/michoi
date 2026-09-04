@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use pad_gateway::agent::replay_timeline;
+use michoi::agent::replay_timeline;
 use sha2::{Digest, Sha256};
 
 #[derive(Parser)]
@@ -227,7 +227,7 @@ async fn main() -> Result<()> {
             history_max_kib,
         } => {
             let repeat = repeat_after.map(Duration::from_secs_f64);
-            let agent = pad_gateway::replay_agent::ReplayAgent::spawn(
+            let agent = michoi::replay_agent::ReplayAgent::spawn(
                 &pcap,
                 speed,
                 Duration::from_secs(1),
@@ -235,7 +235,7 @@ async fn main() -> Result<()> {
                 Duration::from_secs(history_secs),
                 (history_max_kib * 1024) as usize,
             )?;
-            let mut config = pad_gateway::agent_server::ServerConfig {
+            let mut config = michoi::agent_server::ServerConfig {
                 listen: http,
                 token: token.filter(|t| !t.is_empty()),
                 swagger,
@@ -245,7 +245,7 @@ async fn main() -> Result<()> {
                 let lifetime = Duration::from_secs(seconds);
                 config.event_stream_lifetime = (lifetime, lifetime);
             }
-            pad_gateway::agent_server::serve(config, agent).await?;
+            michoi::agent_server::serve(config, agent).await?;
         }
         Commands::Door {
             pcap,
@@ -260,7 +260,7 @@ async fn main() -> Result<()> {
             player,
             audio_out,
         } => {
-            use pad_gateway::door_station::{Callbacks, DoorStation, DoorStationConfig};
+            use michoi::door_station::{Callbacks, DoorStation, DoorStationConfig};
             let config = DoorStationConfig {
                 loop_fps,
                 callbacks: Callbacks {
@@ -274,14 +274,14 @@ async fn main() -> Result<()> {
                 ..Default::default()
             };
             let station = DoorStation::from_capture(&pcap, config)?;
-            pad_gateway::door_station::spawn_console(station.clone());
-            let server = pad_gateway::agent_server::ServerConfig {
+            michoi::door_station::spawn_console(station.clone());
+            let server = michoi::agent_server::ServerConfig {
                 listen: http,
                 token: token.filter(|t| !t.is_empty()),
                 swagger,
                 ..Default::default()
             };
-            pad_gateway::agent_server::serve(server, station).await?;
+            michoi::agent_server::serve(server, station).await?;
         }
         Commands::EmitDoor {
             target,
@@ -299,8 +299,8 @@ async fn main() -> Result<()> {
             broadcast,
             discover_timeout,
         } => {
-            use pad_gateway::emitter::{resolve_pad, DoorIdentity, MediaSource};
-            use pad_gateway::protocol::{Station, CONTROL_PORT};
+            use michoi::emitter::{resolve_pad, DoorIdentity, MediaSource};
+            use michoi::protocol::{Station, CONTROL_PORT};
             let target = match target {
                 // Explicit target: `ip` or `ip:port`, no discovery.
                 Some(target) => match target.parse::<SocketAddr>() {
@@ -334,14 +334,14 @@ async fn main() -> Result<()> {
                 room: Station::new(room_id, room_ip),
             };
             let media = MediaSource::load(&frames, audio_file.as_deref())?;
-            let sink = pad_gateway::door_station::AudioSink::open(
+            let sink = michoi::door_station::AudioSink::open(
                 play,
                 player.as_deref(),
                 audio_out.as_deref(),
                 "pad-voice.s16le",
             )?;
             let duration = seconds.map(Duration::from_secs_f64);
-            let obs = pad_gateway::emitter::run_emulator(
+            let obs = michoi::emitter::run_emulator(
                 identity,
                 media,
                 target,
@@ -360,7 +360,7 @@ async fn main() -> Result<()> {
             broadcast,
             timeout,
         } => {
-            let ip = pad_gateway::emitter::resolve_pad(
+            let ip = michoi::emitter::resolve_pad(
                 &room_id,
                 broadcast,
                 Duration::from_secs_f64(timeout),
@@ -369,7 +369,7 @@ async fn main() -> Result<()> {
             println!("{room_id} -> {ip}");
         }
         Commands::CheckConfig { path } => {
-            let config = pad_gateway::config::Config::load(path)?;
+            let config = michoi::config::Config::load(path)?;
             println!("{config:#?}");
         }
         Commands::PadAgent {
@@ -383,16 +383,16 @@ async fn main() -> Result<()> {
             history_secs,
             history_max_kib,
         } => {
-            let server = pad_gateway::agent_server::ServerConfig {
+            let server = michoi::agent_server::ServerConfig {
                 listen: http,
                 token: token.filter(|t| !t.is_empty()),
                 swagger,
                 ..Default::default()
             };
-            pad_gateway::socket_agent::run_socket_agent(
+            michoi::socket_agent::run_socket_agent(
                 server,
                 listen,
-                pad_gateway::protocol::Station::new(room_id, room_ip),
+                michoi::protocol::Station::new(room_id, room_ip),
                 Duration::from_secs(history_secs),
                 (history_max_kib * 1024) as usize,
                 discover,
@@ -400,8 +400,8 @@ async fn main() -> Result<()> {
             .await?;
         }
         Commands::NftRules { config } => {
-            let config = pad_gateway::config::Config::load(config)?;
-            print!("{}", pad_gateway::firewall::nft_rules(&config)?);
+            let config = michoi::config::Config::load(config)?;
+            print!("{}", michoi::firewall::nft_rules(&config)?);
         }
         Commands::Agent { config } => run_agent(config).await?,
     }
@@ -409,15 +409,15 @@ async fn main() -> Result<()> {
 }
 
 async fn run_agent(path: PathBuf) -> Result<()> {
-    let config = pad_gateway::config::Config::load(path)?;
+    let config = michoi::config::Config::load(path)?;
     #[cfg(all(target_os = "linux", feature = "linux-packet"))]
     {
-        use pad_gateway::agent::{run_live_agent, LivePolicy};
+        use michoi::agent::{run_live_agent, LivePolicy};
         let policy = LivePolicy {
             cooldown: Duration::from_millis(config.security.unlock_cooldown_ms),
             unlock_requires_answer: config.security.unlock_requires_answer,
         };
-        let server = pad_gateway::agent_server::ServerConfig {
+        let server = michoi::agent_server::ServerConfig {
             listen: config.agent.http_listen,
             token: Some(config.agent.token.clone()).filter(|t| !t.is_empty()),
             swagger: config.agent.swagger,

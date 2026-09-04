@@ -4,7 +4,7 @@ use crate::config::{CoexistenceMode, Config, IntercomConfig};
 
 /// nftables bridge table the Agent owns. Removing it restores the physical
 /// Pad path (fail-open), so the Agent flushes it on shutdown.
-pub const TABLE: &str = "pad_gateway";
+pub const TABLE: &str = "michoi";
 
 /// Produce an atomic nftables table for the selected coexistence mode.
 /// The rule matches the physical bridge ingress interface, so AF_PACKET frames
@@ -110,7 +110,7 @@ mod tests {
     fn silence_and_static_share_one_table() {
         assert!(pad_silence_rules(&configured().intercom)
             .unwrap()
-            .contains("table bridge pad_gateway"));
-        assert_eq!(flush_table_command(), "delete table bridge pad_gateway");
+            .contains("table bridge michoi"));
+        assert_eq!(flush_table_command(), "delete table bridge michoi");
     }
 }

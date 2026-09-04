@@ -39,6 +39,8 @@ def receive_opcode(sock: socket.socket, opcode: int) -> PenguinMessage:
 
 
 def main() -> None:
+    if not (ROOT / "testdata" / "pad.cap").exists():
+        raise SystemExit("testdata/pad.cap is not present (private capture, not in git)")
     records = {record.frame_number: record for record in read_udp(ROOT / "testdata" / "pad.cap")}
     door = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     door.bind(("127.0.0.1", 10_000))

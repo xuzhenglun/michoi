@@ -1,16 +1,26 @@
 use std::time::{Duration, Instant};
 
-use pad_gateway::agent::replay_timeline;
-use pad_gateway::pcap::read_udp;
-use pad_gateway::protocol::{
+use michoi::agent::replay_timeline;
+use michoi::pcap::read_udp;
+use michoi::protocol::{
     audio_packet, session_control, split_coalesced, Endpoints, JpegReassembler, Message,
     FAMILY_SESSION, MEDIA_AUDIO, OP_ANSWER, OP_MEDIA, OP_UNLOCK,
 };
-use pad_gateway::state::{CallMachine, CallPhase, Owner, StateError};
-use pad_gateway::transport::{AgentEvent, FrameKind};
+use michoi::state::{CallMachine, CallPhase, Owner, StateError};
+use michoi::transport::{AgentEvent, FrameKind};
+
+/// The capture is private and not in git; tests that need it skip when it
+/// is absent so the repository stays testable without it.
+fn capture_present() -> bool {
+    std::path::Path::new("testdata/pad.cap").exists()
+}
 
 #[test]
 fn captured_session_and_media_are_decoded() {
+    if !capture_present() {
+        eprintln!("skipped: testdata/pad.cap is not present");
+        return;
+    }
     let records = read_udp("testdata/pad.cap").expect("read capture");
     let mut calls = 0;
     let mut answers = 0;
@@ -67,6 +77,10 @@ fn production_encoder_round_trips() {
 
 #[test]
 fn replay_timeline_decodes_events_and_media() {
+    if !capture_present() {
+        eprintln!("skipped: testdata/pad.cap is not present");
+        return;
+    }
     let timeline = replay_timeline("testdata/pad.cap").unwrap();
     assert_eq!(timeline.len(), 334);
     // The first frame is a control event that decodes back to CallStarted.

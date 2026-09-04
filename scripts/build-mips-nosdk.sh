@@ -10,7 +10,7 @@
 #   rustup toolchain install nightly
 #   rustup component add rust-src --toolchain nightly
 #
-# Produces: target/mipsel-unknown-linux-musl/release/pad-gateway
+# Produces: target/mipsel-unknown-linux-musl/release/michoi
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -59,7 +59,7 @@ export RUSTFLAGS="-C target-cpu=mips32r2 -C target-feature=+soft-float,+crt-stat
   --target "$TARGET" --release \
   --no-default-features --features linux-packet
 
-BIN="target/$TARGET/release/pad-gateway"
+BIN="target/$TARGET/release/michoi"
 echo
 file "$BIN"
 ls -la "$BIN"

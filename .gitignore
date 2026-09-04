@@ -1,7 +1,14 @@
 /target/
 *.log
-pad-gateway.toml
+michoi.toml
 .matter-state/
 .hap-state/
 .DS_Store
 wip/
+# Private capture of the author's installation: never commit.
+testdata/pad.cap
+*.cap
+*.pcap
+__pycache__/
+*.pyc
+michoi.toml

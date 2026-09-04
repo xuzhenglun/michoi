@@ -27,7 +27,7 @@ cargo +nightly build \
     --no-default-features \
     --features linux-packet
 
-binary="target/$target/release/pad-gateway"
+binary="target/$target/release/michoi"
 bytes=$(wc -c < "$binary" | tr -d ' ')
 limit=$((8 * 1024 * 1024))
 if [ "$bytes" -gt "$limit" ]; then

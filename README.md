@@ -1,14 +1,13 @@
-# pad-gateway
+# michoi
 
-`pad-gateway` is a clean-room Rust implementation of the `PENGUIN0` LAN
+`michoi` is a clean-room Rust implementation of the `PENGUIN0` LAN
 intercom seen in `testdata/pad.cap`: the **Agent** that captures the door
 station traffic, arbitrates who owns a call, injects the answer / unlock /
 hangup packets, and exposes all of that to smart-home backends over standard
 protocols. It targets macOS for replay/development and Linux / OpenWrt
 `ramips/mt76x8` for packet capture and control injection.
 
-The decoded installation is room station `S00000000000` (`192.168.124.61`,
-) and door station `M00000000000` (`192.168.124.2`). UDP 10008
+The decoded installation is room station `S00000000000` (`192.168.124.61`) and door station `M00000000000` (`192.168.124.2`). UDP 10008
 is discovery; UDP 10000 carries call control, fragmented JPEG and PCM audio.
 The complete evidence-backed wire description is in
 [`docs/PENGUIN0.md`](docs/PENGUIN0.md); component boundaries are in
@@ -274,18 +273,18 @@ physical Pad unblocked. Validate passive capture logs. Then print and review the
 manual rule:
 
 ```sh
-/usr/sbin/pad-gateway check-config /etc/pad-gateway/config.toml
-/usr/sbin/pad-gateway nft-rules /etc/pad-gateway/config.toml
-/usr/sbin/pad-gateway agent /etc/pad-gateway/config.toml
+/usr/sbin/michoi check-config /etc/michoi/config.toml
+/usr/sbin/michoi nft-rules /etc/michoi/config.toml
+/usr/sbin/michoi agent /etc/michoi/config.toml
 ```
 
 Apply the printed rule only during a supervised test. It matches the physical
 Pad bridge ingress interface rather than merely its MAC, so locally injected
-replacement packets are not dropped. Removing table `bridge pad_gateway`
+replacement packets are not dropped. Removing table `bridge michoi`
 restores the Pad path:
 
 ```sh
-nft delete table bridge pad_gateway
+nft delete table bridge michoi
 ```
 
 AF_PACKET requires root or `CAP_NET_RAW`. Keep UDP 10000/10008 private and do

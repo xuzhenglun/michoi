@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
-  title: pad-gateway Agent control plane
+  title: michoi Agent control plane
   version: "1"
   description: |
-    Control plane of a `pad-gateway` Agent: the process that captures the
+    Control plane of a `michoi` Agent: the process that captures the
     PENGUIN0 intercom traffic, arbitrates who owns a call, and injects the
     answer / unlock / hangup packets. Backends (Matter, HomeKit, Home
     Assistant, Homebridge plugins) talk to it over plain HTTP/1.1.
