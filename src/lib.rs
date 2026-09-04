@@ -3,6 +3,7 @@ pub mod agent_api;
 pub mod agent_server;
 pub mod config;
 pub mod door_station;
+pub mod emitter;
 pub mod ethernet;
 pub mod firewall;
 pub mod media;

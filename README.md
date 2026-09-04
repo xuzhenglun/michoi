@@ -127,6 +127,20 @@ cargo run -- door testdata/pad.cap --http 127.0.0.1:8080 --token secret \
 Point the browser Pad or `scripts/agent-http-test.py` at it as usual; type
 `ring` in the door console to raise a call.
 
+To ring a **real** room Pad (or another Agent's capture path) instead of the
+internal HTTP clients, replay the captured door→Pad datagrams onto the wire:
+type `ring 192.168.124.61` in the door console, or use the standalone command
+
+```sh
+cargo run -- emit-door 192.168.124.61 testdata/pad.cap
+```
+
+It sends the door's `00b7/01` session setup and then the JPEG and audio to the
+target UDP control port, verbatim and with capture timing, so the target sees
+the same call. The PENGUIN0 body still carries the captured station IDs and
+IPs; a real Pad that validates those may need them rewritten first (untested
+without hardware).
+
 ### Browser Pad
 
 The Agent serves a self-contained page at `/pad` (also `/`) that behaves

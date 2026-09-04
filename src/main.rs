@@ -82,6 +82,22 @@ enum Commands {
         #[arg(long, value_name = "CMD")]
         player: Option<String>,
     },
+    /// Emit the captured door->Pad traffic to a target IP over UDP, to ring a
+    /// real room Pad or exercise another Agent's capture path.
+    EmitDoor {
+        /// Target `ip` or `ip:port` (port defaults to the control port).
+        target: String,
+        #[arg(default_value = "testdata/pad.cap")]
+        pcap: PathBuf,
+        /// Source door IPv4 in the capture, used to pick door->Pad datagrams.
+        #[arg(long, default_value = "192.168.124.2")]
+        door_ip: std::net::Ipv4Addr,
+        #[arg(long, default_value_t = 1.0)]
+        speed: f64,
+        /// Send the call again after this many idle seconds.
+        #[arg(long, value_name = "SECONDS")]
+        repeat_after: Option<f64>,
+    },
     /// Consume the legacy PAG1 WebSocket feed of an Agent (smoke test).
     Pag1Client {
         #[arg(long, default_value = "ws://127.0.0.1:9443")]
@@ -192,6 +208,25 @@ async fn main() -> Result<()> {
                 ..Default::default()
             };
             pad_gateway::agent_server::serve(server, station).await?;
+        }
+        Commands::EmitDoor {
+            target,
+            pcap,
+            door_ip,
+            speed,
+            repeat_after,
+        } => {
+            let target = match target.parse::<SocketAddr>() {
+                Ok(addr) => addr,
+                Err(_) => {
+                    let ip: std::net::Ipv4Addr = target
+                        .parse()
+                        .map_err(|_| anyhow::anyhow!("invalid target: {target}"))?;
+                    SocketAddr::new(ip.into(), pad_gateway::protocol::CONTROL_PORT)
+                }
+            };
+            let repeat = repeat_after.map(Duration::from_secs_f64);
+            pad_gateway::emitter::emit_capture(&pcap, door_ip, target, speed, repeat).await?;
         }
         Commands::Pag1Client { agent, scripted } => run_backend(&agent, scripted).await?,
         Commands::CheckConfig { path } => {

@@ -10,6 +10,7 @@
 //! they would to a real Agent.
 
 use std::io::Write as _;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,6 +45,9 @@ pub struct Callbacks {
 pub struct DoorStationConfig {
     pub door_id: String,
     pub room_id: String,
+    /// Source door IPv4 used to pick door->Pad datagrams when emitting to a
+    /// real Pad on the wire.
+    pub door_ip: Ipv4Addr,
     /// Frames per second at which the saved camera loops.
     pub loop_fps: u16,
     pub cooldown: Duration,
@@ -60,6 +64,7 @@ impl Default for DoorStationConfig {
         Self {
             door_id: "M00000000000".into(),
             room_id: "S00000000000".into(),
+            door_ip: Ipv4Addr::new(192, 168, 124, 2),
             loop_fps: 8,
             cooldown: Duration::from_secs(1),
             history: Duration::from_secs(5),
@@ -76,6 +81,7 @@ struct CallInner {
 }
 
 pub struct DoorStation {
+    capture: std::path::PathBuf,
     frames: Vec<Arc<[u8]>>,
     audio: Vec<Arc<[u8]>>,
     config: DoorStationConfig,
@@ -96,7 +102,8 @@ impl DoorStation {
     /// Load the saved camera/microphone data from a capture and build a door
     /// station ready to be served.
     pub fn from_capture(pcap: impl AsRef<Path>, config: DoorStationConfig) -> Result<Arc<Self>> {
-        let timeline = replay_timeline(pcap)?;
+        let capture = pcap.as_ref().to_path_buf();
+        let timeline = replay_timeline(&capture)?;
         let mut frames = Vec::new();
         let mut audio = Vec::new();
         for timed in &timeline {
@@ -115,6 +122,7 @@ impl DoorStation {
         let (video, _) = broadcast::channel(32);
         let (door_audio, _) = broadcast::channel(128);
         Ok(Arc::new(Self {
+            capture,
             frames,
             audio,
             call: Mutex::new(CallInner {
@@ -169,6 +177,20 @@ impl DoorStation {
             self.runtime
                 .spawn(async move { station.media_loop().await });
         }
+    }
+
+    /// Ring a real room Pad by replaying the captured door->Pad datagrams to
+    /// `target` over the wire. Independent of the internal HTTP call state.
+    pub fn emit_to(self: &Arc<Self>, target: SocketAddr) {
+        let capture = self.capture.clone();
+        let door_ip = self.config.door_ip;
+        self.runtime.spawn(async move {
+            if let Err(error) =
+                crate::emitter::emit_capture(&capture, door_ip, target, 1.0, None).await
+            {
+                tracing::warn!(%error, %target, "emitting door traffic failed");
+            }
+        });
     }
 
     /// End the current call (operator or a backend hung up).
@@ -485,14 +507,35 @@ impl AgentMedia for DoorStation {
 }
 
 /// Read operator commands from stdin: `ring`, `hangup`, `quit`, `help`.
+/// Parse `ip` or `ip:port`, defaulting the port to the PENGUIN0 control port.
+fn parse_target(arg: &str) -> Option<SocketAddr> {
+    if let Ok(addr) = arg.parse::<SocketAddr>() {
+        return Some(addr);
+    }
+    let ip: Ipv4Addr = arg.parse().ok()?;
+    Some(SocketAddr::new(ip.into(), crate::protocol::CONTROL_PORT))
+}
+
 pub fn spawn_console(station: Arc<DoorStation>) {
     std::thread::spawn(move || {
         use std::io::BufRead;
-        println!("软件门口机就绪。命令：ring 呼叫 / hangup 挂断 / quit 退出");
+        println!("软件门口机就绪。命令：ring 内部呼叫 / ring <ip> 呼叫真实 Pad / hangup 挂断 / quit 退出");
         let stdin = std::io::stdin();
         for line in stdin.lock().lines() {
             let Ok(line) = line else { break };
             match line.trim() {
+                other if other.starts_with("ring ") => {
+                    let arg = other[5..].trim();
+                    match parse_target(arg) {
+                        Some(target) => {
+                            println!(
+                                "向 {target} 发送真实门口机呼叫（重放抓包的门口机->Pad 数据报）"
+                            );
+                            station.emit_to(target);
+                        }
+                        None => println!("无法解析目标地址：{arg}（示例 ring 192.168.124.61）"),
+                    }
+                }
                 "ring" | "r" => station.ring(),
                 "hangup" | "h" | "end" => station.hangup_local("operator_hangup"),
                 "quit" | "q" | "exit" => {
@@ -500,7 +543,9 @@ pub fn spawn_console(station: Arc<DoorStation>) {
                     std::process::exit(0);
                 }
                 "help" | "?" | "" => {
-                    println!("ring 呼叫室内机 / hangup 挂断 / quit 退出");
+                    println!(
+                        "ring 内部呼叫 / ring <ip> 向真实 Pad 发送呼叫 / hangup 挂断 / quit 退出"
+                    );
                 }
                 other => println!("未知命令：{other}（ring / hangup / quit）"),
             }
