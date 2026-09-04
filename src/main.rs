@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -136,6 +136,38 @@ enum Commands {
         /// Seconds to wait for a reply.
         #[arg(long, default_value_t = 3.0)]
         timeout: f64,
+    },
+    /// Software Pad Agent: bind the control port, accept a door emulator
+    /// (`emit-door`) over UDP, and serve it to backends over the HTTP control
+    /// plane. Cross-platform (no AF_PACKET); access it from the browser Pad.
+    PadAgent {
+        /// UDP control port to bind (the Pad endpoint the door rings).
+        #[arg(long, default_value = "0.0.0.0:10000")]
+        listen: SocketAddr,
+        /// HTTP control plane (REST + SSE + browser Pad) address.
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        http: SocketAddr,
+        /// This Pad's room Station ID.
+        #[arg(long, default_value = "S00000000000")]
+        room_id: String,
+        /// This Pad's IPv4 written into reply bodies (cosmetic on loopback).
+        #[arg(long, default_value = "127.0.0.1")]
+        room_ip: Ipv4Addr,
+        /// Bearer token for the control plane.
+        #[arg(long)]
+        token: Option<String>,
+        /// Serve Swagger UI at /swagger.
+        #[arg(long)]
+        swagger: bool,
+        /// Also answer UDP 10008 discovery for --room-id.
+        #[arg(long)]
+        discover: bool,
+        /// Seconds of media kept for late joiners (0 = off).
+        #[arg(long, default_value_t = 5)]
+        history_secs: u64,
+        /// Byte cap of the media history in KiB.
+        #[arg(long, default_value_t = 2048)]
+        history_max_kib: u64,
     },
     /// Print the bridge-family nftables rules for manual/automatic coexistence.
     NftRules { config: PathBuf },
@@ -306,6 +338,33 @@ async fn main() -> Result<()> {
         Commands::CheckConfig { path } => {
             let config = pad_gateway::config::Config::load(path)?;
             println!("{config:#?}");
+        }
+        Commands::PadAgent {
+            listen,
+            http,
+            room_id,
+            room_ip,
+            token,
+            swagger,
+            discover,
+            history_secs,
+            history_max_kib,
+        } => {
+            let server = pad_gateway::agent_server::ServerConfig {
+                listen: http,
+                token: token.filter(|t| !t.is_empty()),
+                swagger,
+                ..Default::default()
+            };
+            pad_gateway::socket_agent::run_socket_agent(
+                server,
+                listen,
+                pad_gateway::protocol::Station::new(room_id, room_ip),
+                Duration::from_secs(history_secs),
+                (history_max_kib * 1024) as usize,
+                discover,
+            )
+            .await?;
         }
         Commands::NftRules { config } => {
             let config = pad_gateway::config::Config::load(config)?;

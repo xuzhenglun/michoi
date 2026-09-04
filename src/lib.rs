@@ -10,6 +10,7 @@ pub mod media;
 pub mod pcap;
 pub mod protocol;
 pub mod replay_agent;
+pub mod socket_agent;
 pub mod state;
 pub mod transport;
 

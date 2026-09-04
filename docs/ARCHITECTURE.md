@@ -23,6 +23,11 @@ Pad 未接听时成功；unlock 只在远程已接听时允许，默认 1 秒冷
   `EventLog`（事件环）、`CommandCache`（幂等缓存）、`MediaRing`（按时间和字节
   双上限的预录缓冲）。
 - `replay_agent`：进程内的 pcap 回放实现，走生产状态机和编码器，只是不注入。
+- `socket_agent`：用户态 Pad 端 Agent，绑 UDP 控制口扮演 Pad，接住 `emit-door`
+  合成门口机的寻呼/引导/会话握手，把门口视频/音频经同一 HTTP 控制面 fan-out；
+  后端的接听/开门/对讲以 Pad 身份回发给门口机。纯 tokio UDP、跨平台（不需
+  AF_PACKET），因此 `emit-door` ↔ `socket_agent` ↔ 浏览器 Pad 可在一台
+  笔记本上闭环，无需硬件和桥。
 - `emitter`：从协议合成的软件门口机模拟器。按配置的门口机/房间身份，按实机验证的
   呼叫顺序发包：`005d/01` 寻呼 ×10（振铃触发）→ `0098/01` bootstrap → `00b7/01`
   ring ×3 → `00b7/0a` 视频 + keepalive；**音频在收到 Pad 的 `00b7/05` answer 后才发**

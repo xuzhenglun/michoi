@@ -172,6 +172,31 @@ and sends a voice packet so the emulator can be tested end to end without
 hardware. This is the harness for validating the Agent and, later, the
 HAP/Matter backends when the real door and Pad are far apart.
 
+### Full loop on one machine: `pad-agent`
+
+`pad-agent` is a user-space Pad-side Agent over a plain UDP socket, so the whole
+chain runs on a laptop with no hardware and no bridge: `emit-door` (the
+synthesized door) rings it, it answers the paging / bootstrap / session
+handshake and fans the door's video and audio out over the same HTTP control
+plane, and the browser Pad drives it. Answer / unlock / talk from the browser
+are sent back to the door as Pad-originated packets. Unlike the live Agent it
+needs no AF_PACKET, so it runs on macOS too.
+
+```sh
+# terminal 1: the software Pad + HTTP control plane (+ browser Pad at /)
+cargo run -- pad-agent --listen 127.0.0.1:10000 --http 127.0.0.1:8080
+
+# terminal 2: ring it as a synthesized door station
+cargo run -- emit-door 127.0.0.1 --frames testdata/frames --player off
+```
+
+Then open `http://127.0.0.1:8080/`: the page rings, shows the door picture,
+and its answer / unlock / talk buttons drive `emit-door` (which prints the
+`00b7/05` answer, `00b7/06` unlock and voice it receives back). `emit-door`
+binds an ephemeral port automatically when `pad-agent` already holds the
+control port. Add `--discover` to `pad-agent` to also answer UDP 10008 so
+`emit-door --discover` can find it.
+
 ### Browser Pad
 
 The Agent serves a self-contained page at `/pad` (also `/`) that behaves
