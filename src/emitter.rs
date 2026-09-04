@@ -147,6 +147,52 @@ fn observe_reply(
     }
 }
 
+/// Resolve a Pad's IPv4 from its room Station ID using the UDP 10008
+/// discovery protocol (a private ARP): broadcast `01 + room_id`, and take the
+/// source address of the `02 + room_id` reply. `broadcast` is where the query
+/// is sent (e.g. the subnet broadcast or 255.255.255.255).
+pub async fn resolve_pad(
+    room_id: &str,
+    broadcast: Ipv4Addr,
+    timeout: Duration,
+) -> Result<Ipv4Addr> {
+    use crate::protocol::{discovery_reply_room, discovery_request, DISCOVERY_PORT};
+    let bind = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), DISCOVERY_PORT);
+    let socket = match UdpSocket::bind(bind).await {
+        Ok(socket) => socket,
+        Err(_) => UdpSocket::bind(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)).await?,
+    };
+    socket
+        .set_broadcast(true)
+        .context("enabling UDP broadcast")?;
+    let request = discovery_request(room_id)?;
+    let dest = SocketAddr::new(broadcast.into(), DISCOVERY_PORT);
+    socket
+        .send_to(&request, dest)
+        .await
+        .context("sending discovery request")?;
+    tracing::info!(%dest, room_id, "discovery: who has this room?");
+    let mut buf = vec![0_u8; 1024];
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let recv = tokio::time::timeout_at(deadline, socket.recv_from(&mut buf)).await;
+        let (size, from) = match recv {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(error)) => return Err(error).context("receiving discovery reply"),
+            Err(_) => anyhow::bail!("no discovery reply for {room_id} within {timeout:?}"),
+        };
+        // Re-send the request periodically? One shot is enough on a LAN.
+        if let Some(reply_room) = discovery_reply_room(&buf[..size]) {
+            if reply_room == room_id {
+                if let std::net::IpAddr::V4(ip) = from.ip() {
+                    tracing::info!(%ip, room_id, "discovery: resolved");
+                    return Ok(ip);
+                }
+            }
+        }
+    }
+}
+
 /// Ring `target` as a synthesized door station and drive the call until a Pad
 /// hangup, `duration`, or the future is dropped. Returns what came back.
 pub async fn run_emulator(
@@ -279,6 +325,26 @@ pub async fn run_emulator(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_request_reply_round_trip() {
+        use crate::protocol::{discovery_reply_room, discovery_request, discovery_request_room};
+        let req = discovery_request("S00000000000").unwrap();
+        assert_eq!(req.len(), 100);
+        assert_eq!(req[0], 1);
+        assert_eq!(
+            discovery_request_room(&req).as_deref(),
+            Some("S00000000000")
+        );
+        let reply = crate::protocol::discovery_reply("S00000000000").unwrap();
+        assert_eq!(
+            discovery_reply_room(&reply).as_deref(),
+            Some("S00000000000")
+        );
+        // A request is not mistaken for a reply and vice versa.
+        assert!(discovery_reply_room(&req).is_none());
+        assert!(discovery_request_room(&reply).is_none());
+    }
 
     #[test]
     fn media_source_loads_the_frame_files() {

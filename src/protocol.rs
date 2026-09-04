@@ -285,6 +285,30 @@ pub fn discovery_request_room(payload: &[u8]) -> Option<String> {
     Some(String::from_utf8_lossy(&data[..end]).into_owned())
 }
 
+/// Build the door's UDP 10008 discovery request: byte `01` then the room
+/// Station ID, NUL-padded to the 100-byte datagram seen on the wire. This is
+/// the "who has room X?" broadcast; the Pad answers from its own IP.
+pub fn discovery_request(room_id: &str) -> Result<[u8; 100], ProtocolError> {
+    if room_id.len() > 34 {
+        return Err(ProtocolError::StationTooLong);
+    }
+    let mut out = [0_u8; 100];
+    out[0] = 1;
+    out[1..1 + room_id.len()].copy_from_slice(room_id.as_bytes());
+    Ok(out)
+}
+
+/// Parse a discovery reply (`02` + room Station ID) and return the room ID.
+/// The Pad's IP is the datagram's source address, not in the body.
+pub fn discovery_reply_room(payload: &[u8]) -> Option<String> {
+    if payload.first().copied() != Some(2) {
+        return None;
+    }
+    let data = &payload[1..];
+    let end = data.iter().position(|b| *b == 0).unwrap_or(data.len());
+    Some(String::from_utf8_lossy(&data[..end]).into_owned())
+}
+
 pub fn discovery_reply(room_id: &str) -> Result<[u8; 35], ProtocolError> {
     if room_id.len() > 34 {
         return Err(ProtocolError::StationTooLong);

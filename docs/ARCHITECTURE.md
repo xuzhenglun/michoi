@@ -27,7 +27,9 @@ Pad 未接听时成功；unlock 只在远程已接听时允许，默认 1 秒冷
   ring、`00b7/0a` 视频/音频、keepalive、hangup（不重放抓包），画面来自 JPEG 文件目录
   （假摄像头），音频来自 PCM 文件或静音；发出后监听 Pad 的回包（capability/answer/
   unlock/voice/hangup）并报告、播放。`session_request` 和 `jpeg_packets` 有“合成==抓包”
-  单测自证。UDP 10008 的设备 ID→IP 查询（类 ARP）暂不实现，目标 IP 由用户给。用途：
+  单测自证。UDP 10008 的设备 ID→IP 查询（类 ARP：广播 `01+room_id`，Pad 从自身地址回
+  `02+room_id`，取应答源 IP）由 `resolve_pad` 实现，`resolve` 子命令或 `emit-door
+  --discover` 使用。用途：
   在门口机与 Pad 相距很远时，验证我们分析的协议、以及 Agent/后端的正确性。
 - `door_station`：可交互的软件门口机。用保存的抓包帧/音频当门口摄像头和麦克风（呼叫
   期间按 `loop_fps` 循环），从 stdin 控制台 ring/hangup，claim/unlock/hangup 走可配置

@@ -146,8 +146,21 @@ and listens for the Pad's replies, reporting and tallying the capability reply
 (`00b7/03`), answer (`00b7/05`), **unlock** (`00b7/06`) and **voice**
 (`00b7/0a` audio, played through `--player`, default ffplay). Answer on the
 Pad and watch the round-trip summary. `--door-id` / `--door-ip` set the
-door's own identity; `--seconds` bounds the run; discovery (the UDP 10008
-device-id→IP lookup) is skipped, you give the Pad's IP directly.
+door's own identity; `--seconds` bounds the run.
+
+The Pad's IP can be resolved from its room Station ID over the private UDP
+10008 discovery protocol (an ARP-like "who has this room?" broadcast; the Pad
+answers from its own address):
+
+```sh
+cargo run -- resolve S00000000000 --broadcast 192.168.104.255
+# S00000000000 -> 192.168.104.108
+cargo run -- emit-door 192.168.104.255 --room-id S00000000000 --discover
+```
+
+With `--discover`, `emit-door` treats its target as the broadcast address,
+resolves the Pad IP from `--room-id`, then rings it. `scripts/fake-pad-discovery.py`
+answers a discovery query for testing.
 
 The reconstruction is checked in unit tests: `session_request` reproduces the
 captured ring byte for byte, and `jpeg_packets` reproduces the captured

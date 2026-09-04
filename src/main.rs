@@ -116,6 +116,22 @@ enum Commands {
         /// Player for the Pad's voice (S16LE 8k mono on stdin); "off" to drop it, default ffplay.
         #[arg(long, value_name = "CMD")]
         player: Option<String>,
+        /// Resolve the target IP from --room-id via UDP 10008 discovery
+        /// instead of requiring it; `target` is then the broadcast address.
+        #[arg(long)]
+        discover: bool,
+    },
+    /// Resolve a Pad's IP from its room Station ID over the UDP 10008
+    /// discovery protocol (a private ARP): broadcast a query, read the reply.
+    Resolve {
+        /// Room Station ID to look up, e.g. S00000000000.
+        room_id: String,
+        /// Where to broadcast the query (subnet broadcast or 255.255.255.255).
+        #[arg(long, default_value = "255.255.255.255")]
+        broadcast: std::net::Ipv4Addr,
+        /// Seconds to wait for a reply.
+        #[arg(long, default_value_t = 3.0)]
+        timeout: f64,
     },
     /// Consume the legacy PAG1 WebSocket feed of an Agent (smoke test).
     Pag1Client {
@@ -239,16 +255,26 @@ async fn main() -> Result<()> {
             fps,
             seconds,
             player,
+            discover,
         } => {
-            use pad_gateway::emitter::{DoorIdentity, MediaSource};
+            use pad_gateway::emitter::{resolve_pad, DoorIdentity, MediaSource};
             use pad_gateway::protocol::{Station, CONTROL_PORT};
-            let target = match target.parse::<SocketAddr>() {
-                Ok(addr) => addr,
-                Err(_) => {
-                    let ip: std::net::Ipv4Addr = target
-                        .parse()
-                        .map_err(|_| anyhow::anyhow!("invalid target: {target}"))?;
-                    SocketAddr::new(ip.into(), CONTROL_PORT)
+            let target = if discover {
+                // `target` is the broadcast address; resolve the Pad IP by room id.
+                let broadcast: std::net::Ipv4Addr = target.parse().map_err(|_| {
+                    anyhow::anyhow!("--discover needs a broadcast address as target")
+                })?;
+                let ip = resolve_pad(&room_id, broadcast, Duration::from_secs(3)).await?;
+                SocketAddr::new(ip.into(), CONTROL_PORT)
+            } else {
+                match target.parse::<SocketAddr>() {
+                    Ok(addr) => addr,
+                    Err(_) => {
+                        let ip: std::net::Ipv4Addr = target
+                            .parse()
+                            .map_err(|_| anyhow::anyhow!("invalid target: {target}"))?;
+                        SocketAddr::new(ip.into(), CONTROL_PORT)
+                    }
                 }
             };
             let room_ip = room_ip.unwrap_or(match target.ip() {
@@ -269,6 +295,19 @@ async fn main() -> Result<()> {
                 "round trip: capability_reply={} answered={} unlocks={} hangups={} voice_packets={} voice_bytes={}",
                 obs.capability_reply, obs.answered, obs.unlocks, obs.hangups, obs.audio_packets, obs.audio_bytes
             );
+        }
+        Commands::Resolve {
+            room_id,
+            broadcast,
+            timeout,
+        } => {
+            let ip = pad_gateway::emitter::resolve_pad(
+                &room_id,
+                broadcast,
+                Duration::from_secs_f64(timeout),
+            )
+            .await?;
+            println!("{room_id} -> {ip}");
         }
         Commands::Pag1Client { agent, scripted } => run_backend(&agent, scripted).await?,
         Commands::CheckConfig { path } => {
