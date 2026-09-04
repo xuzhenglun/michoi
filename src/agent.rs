@@ -467,6 +467,8 @@ pub async fn run_live_agent(
         "bridge_interface is not configured"
     );
     let socket = Arc::new(PacketSocket::open(&intercom.bridge_interface)?);
+    // Clear any silence table left over from a previous run (fail-open).
+    restore_physical_pad();
     let state = Arc::new(Mutex::new(AgentState::with_policy(
         policy.cooldown,
         policy.unlock_requires_answer,
@@ -615,6 +617,10 @@ fn capture_loop(
                 }
             });
             if let Some((id, event)) = outbound {
+                // Any real hangup ends the takeover, so restore the Pad path.
+                if matches!(event, AgentEvent::CallEnded { .. }) {
+                    restore_physical_pad();
+                }
                 let seq = sequence.fetch_add(1, Ordering::Relaxed);
                 if let Ok(frame) = WireFrame::cbor(FrameKind::Event, id, seq, timestamp, &event) {
                     let _ = events.send(frame);
@@ -741,6 +747,16 @@ async fn serve_live(
                             result.error = Some(error.to_string());
                         }
                     }
+                    // First-answer takeover: when a remote backend wins the
+                    // ringing call, silence and lock out the physical Pad, then
+                    // tell it the call ended so it stops ringing immediately.
+                    // Fail-open: rule/reset failures are logged, not fatal.
+                    if opcode == Some(OP_ANSWER) {
+                        silence_physical_pad(&socket, &config, sequence.fetch_add(1, Ordering::Relaxed));
+                    }
+                    if opcode == Some(OP_HANGUP) {
+                        restore_physical_pad();
+                    }
                 }
                 let response = WireFrame::cbor(FrameKind::Result, frame.session_id, frame.sequence, 0, &result)?;
                 sink.lock().await.send(WsMessage::Binary(response.encode().into())).await?;
@@ -748,6 +764,98 @@ async fn serve_live(
             }
         }
     }
+    Ok(())
+}
+
+/// Install the silence table and inject a spoofed door→Pad hangup so the
+/// physical Pad stops ringing at once. Every step is fail-open: a failure
+/// leaves the Pad working and is only logged.
+///
+/// NOTE: needs authorized on-device validation. The capture shows the door
+/// station uses a door→Pad `00b7/1e` to tear the call down, so the reset
+/// reuses that exact envelope, but that a *mid-call* injected hangup silences
+/// this Pad model is not proven by `pad.cap` alone.
+#[cfg(all(target_os = "linux", feature = "linux-packet"))]
+fn silence_physical_pad(socket: &PacketSocket, config: &IntercomConfig, sequence: u32) {
+    match crate::firewall::pad_silence_rules(config) {
+        Ok(rules) => {
+            if let Err(error) = nft_apply(&rules) {
+                tracing::warn!(%error, "failed to install Pad silence rules; Pad stays live");
+            } else {
+                tracing::info!("physical Pad silenced (door<->Pad control dropped)");
+            }
+        }
+        Err(error) => tracing::warn!(%error, "cannot build Pad silence rules"),
+    }
+    if let Err(error) = inject_pad_reset(socket, config, sequence) {
+        tracing::warn!(%error, "failed to inject door->Pad hangup reset");
+    }
+}
+
+/// Remove the silence table so the physical Pad path is restored.
+#[cfg(all(target_os = "linux", feature = "linux-packet"))]
+fn restore_physical_pad() {
+    if let Err(error) = nft_flush() {
+        tracing::warn!(%error, "failed to flush Pad silence table");
+    } else {
+        tracing::info!("physical Pad path restored");
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "linux-packet"))]
+fn nft_apply(rules: &str) -> Result<()> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("nft")
+        .arg("-f")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("spawning nft")?;
+    child
+        .stdin
+        .take()
+        .context("nft stdin")?
+        .write_all(rules.as_bytes())?;
+    let status = child.wait()?;
+    anyhow::ensure!(status.success(), "nft -f exited with {status}");
+    Ok(())
+}
+
+#[cfg(all(target_os = "linux", feature = "linux-packet"))]
+fn nft_flush() -> Result<()> {
+    let status = std::process::Command::new("nft")
+        .args(crate::firewall::flush_table_command().split_whitespace())
+        .status()
+        .context("running nft delete")?;
+    // A missing table is fine; the goal is that it is gone.
+    let _ = status;
+    Ok(())
+}
+
+/// Inject a `00b7/1e` hangup addressed door→Pad (source door, dest Pad), the
+/// reverse of [`inject_payload`], so only the physical Pad sees it.
+#[cfg(all(target_os = "linux", feature = "linux-packet"))]
+fn inject_pad_reset(socket: &PacketSocket, config: &IntercomConfig, sequence: u32) -> Result<()> {
+    let endpoints = Endpoints {
+        door: crate::protocol::Station::new(&config.door_id, config.door_ip),
+        room: crate::protocol::Station::new(&config.room_id, config.room_ip),
+    };
+    let payload = session_control(OP_HANGUP, &endpoints)?;
+    let pad_mac = MacAddress::parse(config.pad_mac.as_deref().context("pad_mac missing")?)?;
+    let door_mac = MacAddress::parse(config.door_mac.as_deref().context("door_mac missing")?)?;
+    let ethernet = build_udp_ipv4(
+        door_mac,
+        pad_mac,
+        config.door_ip,
+        config.room_ip,
+        config.control_port,
+        config.control_port,
+        &payload,
+        sequence as u16,
+    )?;
+    let sent = socket.send(&ethernet)?;
+    anyhow::ensure!(sent == ethernet.len(), "short AF_PACKET send");
     Ok(())
 }
 

@@ -86,13 +86,31 @@ RTSP，视频用 RFC 2435 RTP/JPEG，音频 PCMU/L16，RTP 时间戳加 RTCP SR 
 - `ffmpeg`：持久 `image2pipe` 进程，把 MJPEG 缩放、限帧并编码 H.264 baseline。
   FFmpeg 是否静态或动态链接对 Rust 接口不可见，可由 OpenWrt 包策略决定。
 
-## 共存
+## 共存与 first-answer 静默
 
-- `manual`：nftables 按物理 Pad 的 bridge ingress interface 丢弃 Pad→门口机的
-  UDP 10000/10008；本地 AF_PACKET 注入不匹配该入口。
-- `automatic`：规则送入带 `bypass` 的 NFQUEUE。若用户态仲裁器退出，包 fail-open。
-  自动 first-answer-wins 的 verdict loop 尚未启用；在它完成实机验证前必须使用
-  manual 模式。
+振铃靠门口机→Pad 的 `00b7/01` session setup 和持续媒体维持；结束靠发往 Pad 的
+`00b7/1e`（抓包里门口机重复 3 次）。据此：
+
+- **振铃阶段不下任何规则**，门口机→Pad 正常，物理 Pad 和所有订阅后端一起响、都能
+  看画面。Agent 靠 AF_PACKET 在 RX 侧旁路嗅探，nft forward drop 不影响它继续把媒体
+  转给后端。
+- **远端 claim 成功即接管物理 Pad**（`firewall::pad_silence_rules`）：下发 bridge 表
+  同时丢弃 **门口机→Pad** 和 **Pad→门口机** 的 UDP 10000，前者停铃停画面，后者防止
+  物理 Pad 事后抢接；并注入一个**伪装成门口机、发往 Pad 的 `00b7/1e`**
+  （`inject_pad_reset`），让 Pad 立刻认为通话结束而停铃，不必等它自身超时。远端作为
+  owner 的控制和音频由 Agent 以 Pad→门口机注入，源自主机而非 pad_interface 入口，不被
+  规则命中。
+- **物理 Pad 先接**：Agent 在桥上观察到 Pad→门口机的 `00b7/05`，状态机标记 owner=Pad，
+  不下任何静默规则，远端 claim 被拒。残余竞态只有一个包处理时延。
+- **挂断或程序退出**：删表 fail-open，物理 Pad 恢复；启动时也先清一次残留表。
+
+以上 first-answer 静默是 Linux live Agent（bridge + AF_PACKET + `nft`）的行为，规则和
+reset 包的构造已单测，但 Pad 是否认中途注入的门口机 hangup 需授权实机验证。
+
+- `manual`（旧的保守回退）：nftables 始终丢弃 Pad→门口机的 UDP 10000/10008，物理 Pad
+  完全无法控制，只有远端能操作。
+- `automatic`：规则送入带 `bypass` 的 NFQUEUE 做逐包仲裁；该 verdict loop 尚未启用，
+  上面基于静态规则的静默是更简单、无需逐包 fail-open 的替代路径。
 
 ## 当前实现边界
 

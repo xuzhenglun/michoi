@@ -1114,6 +1114,7 @@ mod tests {
         let request = Request {
             method: "POST".into(),
             path: "/v1/call/claim".into(),
+            query: String::new(),
             headers: vec![(
                 "content-type".into(),
                 "application/json; charset=utf-8".into(),
