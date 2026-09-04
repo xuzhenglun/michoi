@@ -82,8 +82,9 @@ enum Commands {
         #[arg(long, value_name = "CMD")]
         player: Option<String>,
     },
-    /// Emit the captured door->Pad traffic to a target IP over UDP, to ring a
-    /// real room Pad or exercise another Agent's capture path.
+    /// Pretend to be the door station: ring a target (a real room Pad or
+    /// another Agent) with the captured call and report/play what comes back
+    /// (answer, unlock, voice). Answer on the Pad to test the round trip.
     EmitDoor {
         /// Target `ip` or `ip:port` (port defaults to the control port).
         target: String,
@@ -97,6 +98,12 @@ enum Commands {
         /// Send the call again after this many idle seconds.
         #[arg(long, value_name = "SECONDS")]
         repeat_after: Option<f64>,
+        /// Player for the Pad's voice (S16LE 8k mono on stdin); "off" to drop it, default ffplay.
+        #[arg(long, value_name = "CMD")]
+        player: Option<String>,
+        /// Fire and forget: do not listen for the Pad's replies.
+        #[arg(long)]
+        no_listen: bool,
     },
     /// Consume the legacy PAG1 WebSocket feed of an Agent (smoke test).
     Pag1Client {
@@ -215,6 +222,8 @@ async fn main() -> Result<()> {
             door_ip,
             speed,
             repeat_after,
+            player,
+            no_listen,
         } => {
             let target = match target.parse::<SocketAddr>() {
                 Ok(addr) => addr,
@@ -226,7 +235,19 @@ async fn main() -> Result<()> {
                 }
             };
             let repeat = repeat_after.map(Duration::from_secs_f64);
-            pad_gateway::emitter::emit_capture(&pcap, door_ip, target, speed, repeat).await?;
+            if no_listen {
+                pad_gateway::emitter::emit_capture(&pcap, door_ip, target, speed, repeat).await?;
+            } else {
+                let player = player.map(|p| if p == "off" { String::new() } else { p });
+                let obs = pad_gateway::emitter::run_emulator(
+                    &pcap, door_ip, target, speed, repeat, player,
+                )
+                .await?;
+                println!(
+                    "round trip: answered={} unlocks={} hangups={} voice_packets={} voice_bytes={}",
+                    obs.answered, obs.unlocks, obs.hangups, obs.audio_packets, obs.audio_bytes
+                );
+            }
         }
         Commands::Pag1Client { agent, scripted } => run_backend(&agent, scripted).await?,
         Commands::CheckConfig { path } => {

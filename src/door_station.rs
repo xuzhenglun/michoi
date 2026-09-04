@@ -93,7 +93,7 @@ pub struct DoorStation {
     latest: Mutex<Option<VideoFrame>>,
     history: MediaRing,
     streaming: AtomicBool,
-    speaker: Mutex<Option<Speaker>>,
+    speaker: Mutex<Option<Player>>,
     started: Instant,
     runtime: tokio::runtime::Handle,
 }
@@ -281,7 +281,7 @@ impl DoorStation {
         };
         let mut guard = self.speaker.lock().unwrap();
         if guard.is_none() {
-            match Speaker::start(&player) {
+            match Player::start(&player) {
                 Ok(speaker) => {
                     tracing::info!("playing visitor talk-back through the speaker");
                     *guard = Some(speaker);
@@ -309,21 +309,24 @@ impl DoorStation {
         match self.config.player.as_deref() {
             Some("") => None,
             Some(cmd) => Some(cmd.to_owned()),
-            None => Some(
-                "ffplay -hide_banner -loglevel error -nodisp -autoexit -f s16le -ar 8000 -ch_layout mono -i pipe:0"
-                    .to_owned(),
-            ),
+            None => Some(DEFAULT_PLAYER.to_owned()),
         }
     }
 }
 
-struct Speaker {
+/// The default player: ffplay reading raw S16LE 8 kHz mono from stdin.
+pub const DEFAULT_PLAYER: &str =
+    "ffplay -hide_banner -loglevel error -nodisp -autoexit -f s16le -ar 8000 -ch_layout mono -i pipe:0";
+
+/// A subprocess that plays raw PCM written to its stdin, used to hear the
+/// visitor's talk-back and, in the door emulator, the Pad's voice.
+pub struct Player {
     child: Child,
     stdin: ChildStdin,
 }
 
-impl Speaker {
-    fn start(command: &str) -> Result<Self> {
+impl Player {
+    pub fn start(command: &str) -> Result<Self> {
         let mut parts = command.split_whitespace();
         let program = parts.next().context("empty player command")?;
         let mut child = Command::new(program)
@@ -337,12 +340,22 @@ impl Speaker {
         Ok(Self { child, stdin })
     }
 
-    fn write(&mut self, pcm: &[u8]) -> std::io::Result<()> {
+    /// Start from an optional command: `None` uses [`DEFAULT_PLAYER`],
+    /// `Some("")` disables playback (returns `Ok(None)`).
+    pub fn start_opt(command: Option<&str>) -> Result<Option<Self>> {
+        match command {
+            Some("") => Ok(None),
+            Some(cmd) => Self::start(cmd).map(Some),
+            None => Self::start(DEFAULT_PLAYER).map(Some),
+        }
+    }
+
+    pub fn write(&mut self, pcm: &[u8]) -> std::io::Result<()> {
         self.stdin.write_all(pcm)
     }
 }
 
-impl Drop for Speaker {
+impl Drop for Player {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();

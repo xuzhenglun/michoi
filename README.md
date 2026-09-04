@@ -137,9 +137,29 @@ cargo run -- emit-door 192.168.124.61 testdata/pad.cap
 
 It sends the door's `00b7/01` session setup and then the JPEG and audio to the
 target UDP control port, verbatim and with capture timing, so the target sees
-the same call. The PENGUIN0 body still carries the captured station IDs and
-IPs; a real Pad that validates those may need them rewritten first (untested
-without hardware).
+the same call.
+
+By default `emit-door` is a **two-way door emulator**: on one control-port
+socket it rings the target and then listens for what the Pad sends back, so
+you can pretend to be the door, answer on the (possibly far-away) real Pad,
+and confirm the round trip. It reports and tallies the Pad's answer
+(`00b7/05`), **unlock** (`00b7/06`) and **voice** (`00b7/0a` audio), and plays
+the voice through `--player` (default ffplay, `off` to drop). `--no-listen`
+falls back to fire-and-forget. This is how the Agent, and later the HAP/Matter
+backends, get validated end to end without the hardware on the same desk.
+
+`scripts/fake-pad.py` is a tiny standard-library Pad that answers, unlocks and
+sends one voice packet, used to test the emulator itself:
+
+```sh
+python3 scripts/fake-pad.py &                       # listens on 127.0.0.1:10077
+cargo run -- emit-door 127.0.0.1:10077 --speed 20 --player off
+# round trip: answered=true unlocks=1 hangups=0 voice_packets=1 voice_bytes=512
+```
+
+The PENGUIN0 body still carries the captured station IDs and IPs; a real Pad
+that validates those may need them rewritten first (untested without
+hardware).
 
 ### Browser Pad
 
