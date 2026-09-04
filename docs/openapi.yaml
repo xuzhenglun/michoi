@@ -67,6 +67,7 @@ servers:
 
 security:
   - bearer: []
+  - tokenQuery: []
 
 tags:
   - name: discovery
@@ -298,6 +299,94 @@ paths:
         "415":
           $ref: "#/components/responses/UnsupportedMediaType"
 
+  /v1/stream.mjpeg:
+    get:
+      tags: [media]
+      summary: Live door video as MJPEG (multipart/x-mixed-replace)
+      operationId: streamMjpeg
+      description: |
+        Browser-friendly live picture: the latest frame is sent first, then
+        every new door frame as its own part with `X-Pts-Us`. Meant for the
+        built-in Pad page, `<img>` tags, go2rtc and ffmpeg; the RTSP data
+        plane remains the synchronised, standard path. Accept must allow
+        `multipart/x-mixed-replace` or `image/jpeg` (browsers send `*/*`).
+      responses:
+        "200":
+          description: MJPEG stream, one JPEG per part
+          content:
+            multipart/x-mixed-replace:
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
+
+  /v1/audio.pcm:
+    get:
+      tags: [media]
+      summary: Live door audio as raw L16 (chunked)
+      operationId: streamAudio
+      description: |
+        Big-endian 16-bit mono 8 kHz PCM, as `audio/L16` mandates, streamed
+        with chunked transfer encoding until the client closes. No
+        timestamps; pairs with `/v1/stream.mjpeg` for the Pad page.
+      responses:
+        "200":
+          description: PCM stream
+          content:
+            "audio/L16; rate=8000; channels=1":
+              schema:
+                type: string
+                format: binary
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
+
+  /v1/talk.ws:
+    get:
+      tags: [media]
+      summary: Talk-back over WebSocket (browser path)
+      operationId: talkWebSocket
+      description: |
+        HTTP/1.1 cannot stream a request body from a browser, so the Pad page
+        sends microphone audio here: after the standard WebSocket upgrade,
+        every binary message carries PCM S16LE 8 kHz mono. The same
+        exclusivity as `POST /v1/talk` applies; a rejected chunk closes the
+        socket after a text message with a `CommandResult`. Authenticate with
+        `?token=` (WebSocket clients cannot set headers).
+      responses:
+        "101":
+          description: Switching Protocols
+        "400":
+          description: Not a WebSocket upgrade
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/CommandRejected"
+
+  /pad:
+    get:
+      tags: [discovery]
+      summary: Built-in browser Pad
+      operationId: getPad
+      security: []
+      description: |
+        A single self-contained page (no external assets) that behaves like
+        the physical room station: ring alert, live picture and sound,
+        answer, unlock, hang up and hold-to-talk. It stores the bearer token
+        in the browser and uses `?token=` for `EventSource`, `<img>` and the
+        talk WebSocket. `/` redirects here.
+      responses:
+        "200":
+          description: HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+
   /openapi.yaml:
     get:
       tags: [discovery]
@@ -333,6 +422,11 @@ components:
     bearer:
       type: http
       scheme: bearer
+    tokenQuery:
+      type: apiKey
+      in: query
+      name: token
+      description: Same token as the bearer scheme, for clients that cannot set headers (EventSource, img, WebSocket).
 
   requestBodies:
     Command:

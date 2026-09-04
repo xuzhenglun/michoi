@@ -18,6 +18,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::agent_api::{
     AgentControl, AgentMedia, ApiInfo, AudioChunk, CallAction, CommandRequest, EventKind,
@@ -27,6 +28,11 @@ use crate::agent_api::{
 /// The OpenAPI document, embedded so `/openapi.yaml` always matches the
 /// binary.
 pub const OPENAPI_YAML: &str = include_str!("../docs/openapi.yaml");
+
+/// The browser Pad, a single self-contained page served at `/pad`.
+pub const PAD_HTML: &str = include_str!("../web/pad.html");
+
+const MEDIA_TYPE_MJPEG: &str = "multipart/x-mixed-replace; boundary=frame";
 
 const MAX_HEAD: usize = 16 * 1024;
 const MAX_BODY: usize = 1024 * 1024;
@@ -95,6 +101,7 @@ pub async fn serve<A: AgentControl + AgentMedia>(
 struct Request {
     method: String,
     path: String,
+    query: String,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
     keep_alive: bool,
@@ -106,6 +113,14 @@ impl Request {
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.as_str())
+    }
+
+    /// First value of a query parameter, percent-decoded for the common cases.
+    fn query_param(&self, name: &str) -> Option<String> {
+        self.query.split('&').find_map(|pair| {
+            let (k, v) = pair.split_once('=')?;
+            (k == name).then(|| v.replace("%3D", "=").replace("%2B", "+").replace('+', " "))
+        })
     }
 }
 
@@ -195,7 +210,10 @@ async fn read_request(
     let method = parts.next().context("missing method")?.to_owned();
     let target = parts.next().context("missing target")?;
     let version = parts.next().unwrap_or("HTTP/1.1");
-    let path = target.split('?').next().unwrap_or(target).to_owned();
+    let (path, query) = match target.split_once('?') {
+        Some((path, query)) => (path.to_owned(), query.to_owned()),
+        None => (target.to_owned(), String::new()),
+    };
     let mut headers = Vec::new();
     for line in lines {
         if line.is_empty() {
@@ -217,6 +235,7 @@ async fn read_request(
     let mut request = Request {
         method,
         path,
+        query,
         headers,
         body: Vec::new(),
         keep_alive,
@@ -384,15 +403,18 @@ fn require_content_type(request: &Request, expected: &str) -> Result<(), Respons
     }
 }
 
+/// Bearer header, or `?token=` for clients that cannot set headers
+/// (`EventSource`, `<img>`, `<audio>`, WebSocket).
 fn authorized(request: &Request, token: Option<&str>) -> bool {
     let Some(token) = token else { return true };
-    request
+    let from_header = request
         .header("authorization")
         .and_then(|v| {
             v.strip_prefix("Bearer ")
                 .or_else(|| v.strip_prefix("bearer "))
         })
-        .is_some_and(|presented| presented.trim() == token)
+        .is_some_and(|presented| presented.trim() == token);
+    from_header || request.query_param("token").is_some_and(|t| t == token)
 }
 
 // ---------------------------------------------------------------------------
@@ -413,7 +435,10 @@ async fn connection<A: AgentControl + AgentMedia>(
             None => return Ok(()),
         };
         tracing::debug!(%peer, method = %request.method, path = %request.path, "request");
-        let public = matches!(request.path.as_str(), "/openapi.yaml" | "/swagger");
+        let public = matches!(
+            request.path.as_str(),
+            "/openapi.yaml" | "/swagger" | "/" | "/pad"
+        );
         if !public && !authorized(&request, config.token.as_deref()) {
             let response = Response::error(401, "unauthorized", "bearer token required")
                 .header("WWW-Authenticate", "Bearer");
@@ -429,6 +454,15 @@ async fn connection<A: AgentControl + AgentMedia>(
             let response = talk_upload(&mut reader, &request, agent.as_ref()).await?;
             write_response(&mut writer, &response, false).await?;
             return Ok(());
+        }
+        if request.method == "GET" && request.path == "/v1/stream.mjpeg" {
+            return mjpeg_stream(&mut reader, &mut writer, &request, agent.as_ref()).await;
+        }
+        if request.method == "GET" && request.path == "/v1/audio.pcm" {
+            return pcm_stream(&mut reader, &mut writer, &request, agent.as_ref()).await;
+        }
+        if request.method == "GET" && request.path == "/v1/talk.ws" {
+            return talk_websocket(reader, writer, &request, agent).await;
         }
         let response = route(&request, &config, agent.as_ref()).await;
         let keep_alive = request.keep_alive;
@@ -446,6 +480,10 @@ async fn route<A: AgentControl + AgentMedia>(
 ) -> Response {
     match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/openapi.yaml") => Response::new(200, "application/yaml", OPENAPI_YAML.into()),
+        ("GET", "/") | ("GET", "/pad") => {
+            Response::new(200, "text/html; charset=utf-8", PAD_HTML.into())
+                .header("Cache-Control", "no-cache")
+        }
         ("GET", "/swagger") => {
             if config.swagger {
                 Response::new(200, "text/html; charset=utf-8", SWAGGER_HTML.into())
@@ -465,7 +503,15 @@ async fn route<A: AgentControl + AgentMedia>(
                         MEDIA_TYPE_JPEG.into(),
                         MEDIA_TYPE_L16.into(),
                     ],
-                    capabilities: vec!["events".into(), "snapshot".into(), "talk".into()],
+                    capabilities: vec![
+                        "events".into(),
+                        "snapshot".into(),
+                        "mjpeg".into(),
+                        "pcm".into(),
+                        "talk".into(),
+                        "talk-ws".into(),
+                        "pad".into(),
+                    ],
                 },
             ),
             Err(response) => response,
@@ -493,7 +539,11 @@ async fn route<A: AgentControl + AgentMedia>(
         ("POST", "/v1/call/claim") => command(request, agent, CallAction::Claim).await,
         ("POST", "/v1/call/unlock") => command(request, agent, CallAction::Unlock).await,
         ("POST", "/v1/call/hangup") => command(request, agent, CallAction::Hangup).await,
-        ("GET", "/v1/events") | ("POST", "/v1/talk") => {
+        ("GET", "/v1/events")
+        | ("POST", "/v1/talk")
+        | ("GET", "/v1/stream.mjpeg")
+        | ("GET", "/v1/audio.pcm")
+        | ("GET", "/v1/talk.ws") => {
             Response::error(500, "internal", "streaming route reached the plain router")
         }
         (_, path) if path.starts_with("/v1/") => {
@@ -733,6 +783,277 @@ async fn talk_upload<A: AgentControl + AgentMedia>(
         }
     }
     Ok(Response::new(204, MEDIA_TYPE_JSON, Vec::new()))
+}
+
+// ---------------------------------------------------------------------------
+// Browser media: MJPEG, raw PCM, WebSocket talk-back
+// ---------------------------------------------------------------------------
+
+/// Stop a stream as soon as the client goes away, without blocking sends.
+async fn client_gone(reader: &mut BufReader<OwnedReadHalf>) {
+    let mut buf = [0_u8; 64];
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) | Err(_) => return,
+            Ok(_) => continue,
+        }
+    }
+}
+
+/// `multipart/x-mixed-replace` MJPEG: the latest frame first, then live.
+async fn mjpeg_stream<A: AgentControl + AgentMedia>(
+    reader: &mut BufReader<OwnedReadHalf>,
+    writer: &mut OwnedWriteHalf,
+    request: &Request,
+    agent: &A,
+) -> Result<()> {
+    if let Err(response) = require_accept(request, &[MEDIA_TYPE_MJPEG, MEDIA_TYPE_JPEG]) {
+        write_response(writer, &response, false).await?;
+        return Ok(());
+    }
+    let mut live = agent.video();
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {MEDIA_TYPE_MJPEG}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+    );
+    writer.write_all(head.as_bytes()).await?;
+    async fn part(writer: &mut OwnedWriteHalf, jpeg: &[u8], pts_us: u64) -> Result<()> {
+        let part = format!(
+            "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: {}\r\nX-Pts-Us: {}\r\n\r\n",
+            jpeg.len(),
+            pts_us
+        );
+        writer.write_all(part.as_bytes()).await?;
+        writer.write_all(jpeg).await?;
+        writer.write_all(b"\r\n").await?;
+        writer.flush().await?;
+        Ok(())
+    }
+    if let Some(frame) = agent.snapshot() {
+        part(writer, &frame.jpeg, frame.pts_us).await?;
+    }
+    loop {
+        tokio::select! {
+            frame = live.recv() => match frame {
+                Ok(frame) => part(writer, &frame.jpeg, frame.pts_us).await?,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+            _ = client_gone(reader) => break,
+        }
+    }
+    Ok(())
+}
+
+/// Raw door audio as `audio/L16` (big-endian, as the RFC 2586 type says).
+async fn pcm_stream<A: AgentControl + AgentMedia>(
+    reader: &mut BufReader<OwnedReadHalf>,
+    writer: &mut OwnedWriteHalf,
+    request: &Request,
+    agent: &A,
+) -> Result<()> {
+    if let Err(response) = require_accept(request, &[MEDIA_TYPE_L16]) {
+        write_response(writer, &response, false).await?;
+        return Ok(());
+    }
+    let mut live = agent.audio();
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {MEDIA_TYPE_L16}\r\nCache-Control: no-store\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+    );
+    writer.write_all(head.as_bytes()).await?;
+    loop {
+        tokio::select! {
+            chunk = live.recv() => match chunk {
+                Ok(chunk) => {
+                    let mut swapped = chunk.pcm.to_vec();
+                    for pair in swapped.chunks_exact_mut(2) {
+                        pair.swap(0, 1);
+                    }
+                    write_chunk(writer, &swapped).await?;
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+            _ = client_gone(reader) => return Ok(()),
+        }
+    }
+    writer.write_all(b"0\r\n\r\n").await?;
+    Ok(())
+}
+
+/// A TCP stream with bytes the HTTP parser had already buffered put back in
+/// front, so the WebSocket layer sees the exact byte sequence.
+struct PrefixedStream {
+    prefix: Vec<u8>,
+    inner: TcpStream,
+}
+
+impl tokio::io::AsyncRead for PrefixedStream {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if !self.prefix.is_empty() {
+            let n = self.prefix.len().min(buf.remaining());
+            let bytes: Vec<u8> = self.prefix.drain(..n).collect();
+            buf.put_slice(&bytes);
+            return std::task::Poll::Ready(Ok(()));
+        }
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for PrefixedStream {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// WebSocket talk-back: binary messages carry PCM S16LE 8 kHz mono. Browsers
+/// cannot stream an HTTP request body over HTTP/1.1, so this is their path.
+async fn talk_websocket<A: AgentControl + AgentMedia>(
+    reader: BufReader<OwnedReadHalf>,
+    writer: OwnedWriteHalf,
+    request: &Request,
+    agent: Arc<A>,
+) -> Result<()> {
+    let mut writer = writer;
+    let key = match request.header("sec-websocket-key") {
+        Some(key)
+            if request
+                .header("upgrade")
+                .is_some_and(|u| u.eq_ignore_ascii_case("websocket")) =>
+        {
+            key.trim().to_owned()
+        }
+        _ => {
+            let response = Response::error(400, "bad_request", "WebSocket upgrade expected");
+            write_response(&mut writer, &response, false).await?;
+            return Ok(());
+        }
+    };
+    if TALK_BUSY.swap(true, Ordering::AcqRel) {
+        let response = Response::error(409, "talk_busy", "another talk-back upload is active");
+        write_response(&mut writer, &response, false).await?;
+        return Ok(());
+    }
+    struct Release;
+    impl Drop for Release {
+        fn drop(&mut self) {
+            TALK_BUSY.store(false, Ordering::Release);
+        }
+    }
+    let _release = Release;
+
+    use sha1::Digest as _;
+    let accept = base64_encode(&sha1::Sha1::digest(
+        format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11").as_bytes(),
+    ));
+    let head = format!(
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+    );
+    writer.write_all(head.as_bytes()).await?;
+    writer.flush().await?;
+    let prefix = reader.buffer().to_vec();
+    let read_half = reader.into_inner();
+    let stream = read_half
+        .reunite(writer)
+        .map_err(|_| anyhow::anyhow!("reuniting TCP halves"))?;
+    let stream = PrefixedStream {
+        prefix,
+        inner: stream,
+    };
+    let mut socket = tokio_tungstenite::WebSocketStream::from_raw_socket(
+        stream,
+        tokio_tungstenite::tungstenite::protocol::Role::Server,
+        None,
+    )
+    .await;
+    use futures_util::{SinkExt, StreamExt};
+    let started = std::time::Instant::now();
+    let mut pending: Vec<u8> = Vec::new();
+    let mut forwarded = 0_u64;
+    while let Some(message) = socket.next().await {
+        let message = match message {
+            Ok(message) => message,
+            Err(_) => break,
+        };
+        match message {
+            WsMessage::Binary(bytes) => {
+                pending.extend_from_slice(&bytes);
+                while pending.len() >= 512 {
+                    let chunk: Vec<u8> = pending.drain(..512).collect();
+                    let audio = AudioChunk {
+                        pts_us: started.elapsed().as_micros() as u64,
+                        pcm: Arc::from(chunk),
+                    };
+                    if let Err(error) = agent.talk(audio).await {
+                        let result = crate::agent_api::CommandResult::rejected("talk", error);
+                        let _ = socket
+                            .send(WsMessage::Text(
+                                serde_json::to_string(&result).unwrap_or_default().into(),
+                            ))
+                            .await;
+                        let _ = socket.close(None).await;
+                        tracing::info!(forwarded, %error, "WebSocket talk ended by the Agent");
+                        return Ok(());
+                    }
+                    forwarded += 1;
+                }
+            }
+            WsMessage::Ping(payload) => {
+                let _ = socket.send(WsMessage::Pong(payload)).await;
+            }
+            WsMessage::Close(_) => break,
+            _ => {}
+        }
+    }
+    tracing::info!(forwarded, "WebSocket talk closed");
+    Ok(())
 }
 
 const SWAGGER_HTML: &str = r##"<!doctype html>

@@ -147,11 +147,151 @@ def wait_for(client, event_type, seconds):
     return None
 
 
+def raw_get(client, path, accept, seconds, limit=200_000):
+    """GET a streaming resource with a raw socket; returns (status, headers, body)."""
+    req = [f"GET {path} HTTP/1.1", f"Host: {client.host}:{client.port}", f"Accept: {accept}"]
+    if client.token:
+        req.append(f"Authorization: Bearer {client.token}")
+    sock = socket.create_connection((client.host, client.port), timeout=5)
+    sock.sendall(("\r\n".join(req) + "\r\n\r\n").encode())
+    raw = b""
+    while b"\r\n\r\n" not in raw:
+        piece = sock.recv(4096)
+        if not piece:
+            break
+        raw += piece
+    head, body = raw.split(b"\r\n\r\n", 1) if b"\r\n\r\n" in raw else (raw, b"")
+    status = int(head.split(b" ")[1]) if head.startswith(b"HTTP/1.1 ") else 0
+    headers = {k.strip().lower(): v.strip() for k, v in (h.decode().split(":", 1) for h in head.split(b"\r\n")[1:] if b":" in h)}
+    deadline = time.monotonic() + seconds
+    sock.settimeout(0.5)
+    while time.monotonic() < deadline and len(body) < limit:
+        try:
+            piece = sock.recv(8192)
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+        if not piece:
+            break
+        body += piece
+    sock.close()
+    return status, headers, body
+
+
+class RawWebSocket:
+    """Minimal RFC 6455 client: handshake, masked binary frames, close."""
+
+    def __init__(self, client, path):
+        import base64
+        import os
+        self.sock = socket.create_connection((client.host, client.port), timeout=5)
+        key = base64.b64encode(os.urandom(16)).decode()
+        req = [f"GET {path} HTTP/1.1", f"Host: {client.host}:{client.port}", "Upgrade: websocket", "Connection: Upgrade",
+               f"Sec-WebSocket-Key: {key}", "Sec-WebSocket-Version: 13"]
+        self.sock.sendall(("\r\n".join(req) + "\r\n\r\n").encode())
+        raw = b""
+        while b"\r\n\r\n" not in raw:
+            piece = self.sock.recv(4096)
+            if not piece:
+                break
+            raw += piece
+        self.status = int(raw.split(b" ")[1]) if raw.startswith(b"HTTP/1.1 ") else 0
+        self.tail = raw.split(b"\r\n\r\n", 1)[1] if b"\r\n\r\n" in raw else b""
+
+    def send_binary(self, payload):
+        import os
+        mask = os.urandom(4)
+        header = bytes([0x82])
+        n = len(payload)
+        if n < 126:
+            header += bytes([0x80 | n])
+        elif n < 65536:
+            header += bytes([0x80 | 126]) + n.to_bytes(2, "big")
+        else:
+            header += bytes([0x80 | 127]) + n.to_bytes(8, "big")
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        self.sock.sendall(header + mask + masked)
+
+    def recv_text(self, timeout):
+        """Return the first text frame payload within `timeout`, else None."""
+        self.sock.settimeout(timeout)
+        raw = self.tail
+        try:
+            while True:
+                if len(raw) >= 2:
+                    opcode = raw[0] & 0x0F
+                    length = raw[1] & 0x7F
+                    offset = 2
+                    if length == 126:
+                        length = int.from_bytes(raw[2:4], "big"); offset = 4
+                    elif length == 127:
+                        length = int.from_bytes(raw[2:10], "big"); offset = 10
+                    if len(raw) >= offset + length:
+                        payload = raw[offset:offset + length]
+                        raw = raw[offset + length:]
+                        if opcode == 0x1:
+                            return payload.decode()
+                        if opcode == 0x8:
+                            return None
+                        continue
+                piece = self.sock.recv(4096)
+                if not piece:
+                    return None
+                raw += piece
+        except socket.timeout:
+            return None
+
+    def close(self):
+        try:
+            self.sock.sendall(bytes([0x88, 0x80]) + b"\x00\x00\x00\x00")
+        except OSError:
+            pass
+        self.sock.close()
+
+
+def browser_checks(c):
+    status, headers, page = c.request("GET", "/pad", accept="text/html", auth=False)
+    check(status == 200 and b"<title>" in page and b"talk.ws" in page, f"GET /pad -> {status} ({len(page)} bytes, self-contained)")
+    check(b"<script src" not in page and b"<link rel=\"stylesheet\" href=\"http" not in page, "Pad page has no external assets")
+    status, headers, body = raw_get(c, "/v1/stream.mjpeg", "*/*", 2.5)
+    check(status == 200 and headers.get("content-type", "").startswith("multipart/x-mixed-replace"), f"MJPEG stream -> {status}")
+    check(body.count(b"--frame") >= 2 and b"\xff\xd8" in body, f"MJPEG delivered {body.count(b'--frame')} frames in 2.5 s")
+    status, _, _ = c.request("GET", "/v1/stream.mjpeg?token=wrong", accept="*/*", auth=False)
+    check(status == 401 if c.token else status == 200, "MJPEG query token enforced")
+    status, headers, body = raw_get(c, "/v1/audio.pcm", "audio/L16", 12, limit=20_000)
+    check(status == 200 and headers.get("content-type", "").startswith("audio/L16"), f"PCM stream -> {status}")
+    check(len(body) > 0, f"PCM delivered {len(body)} bytes within 12 s")
+    # WebSocket talk during a call we own.
+    print("waiting for call_started to test WebSocket talk-back ...")
+    ring = wait_for(c, "call_started", 40)
+    check(ring is not None, "call_started for the WebSocket test")
+    status, _, result = c.json("POST", "/v1/call/claim", {"command_id": f"ws-{int(time.time())}"})
+    check(status == 200, "claim before WebSocket talk")
+    path = "/v1/talk.ws" + (f"?token={c.token}" if c.token else "")
+    ws = RawWebSocket(c, path)
+    check(ws.status == 101, f"WebSocket upgrade -> {ws.status}")
+    for _ in range(20):
+        ws.send_binary(b"\x00" * 512)
+        time.sleep(0.032)
+    second = RawWebSocket(c, path)
+    check(second.status == 409, f"second WebSocket talk refused -> {second.status}")
+    second.close()
+    check(ws.recv_text(0.5) is None, "first WebSocket talk kept streaming without rejection")
+    ws.close()
+    time.sleep(0.3)
+    third = RawWebSocket(c, path)
+    check(third.status == 101, "talk slot released after the WebSocket closed")
+    third.close()
+    c.json("POST", "/v1/call/hangup", {"command_id": f"ws-h-{int(time.time())}"})
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("base", nargs="?", default="http://127.0.0.1:8080")
     parser.add_argument("--token", default="")
     parser.add_argument("--sse-seconds", type=float, default=10.0, help="how long to hold the event stream")
+    parser.add_argument("--browser", action="store_true", help="also exercise the Pad page endpoints: MJPEG, PCM, WebSocket talk")
     args = parser.parse_args()
     c = Client(args.base, args.token)
 
@@ -257,6 +397,9 @@ def main():
     latest = max(ids)
     messages, _ = sse_stream(c, 2, last_event_id=latest)
     check(any("resumed" in x for m in messages for x in m.get("comments", [])) or not [m for m in messages if "id" in m], "resume at the newest id yields no replay")
+    if args.browser:
+        browser_checks(c)
+
     messages, closed = sse_stream(c, args.sse_seconds)
     check(messages and messages[0].get("event") == "snapshot", "fresh stream starts with a snapshot")
     if closed:

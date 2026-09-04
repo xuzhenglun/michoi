@@ -99,6 +99,38 @@ curl -X POST -H 'Authorization: Bearer secret' -H 'Accept: application/json' -H 
 open http://127.0.0.1:8080/swagger
 ```
 
+### Browser Pad
+
+The Agent serves a self-contained page at `/pad` (also `/`) that behaves
+like the physical room station: ring alert with a Web Audio ringtone, live
+door picture and sound, answer, unlock (answers first when the door is still
+ringing), hang up, and hold-to-talk. It has no external assets and no build
+step; the token is stored in the browser and appended as `?token=` where
+headers are impossible (`EventSource`, `<img>`, WebSocket).
+
+```sh
+cargo run -- fake-agent --repeat-after 4 --http 127.0.0.1:8080 --token secret
+open http://127.0.0.1:8080/pad      # enter "secret" in the settings dialog
+```
+
+Browser transports, all served by the same HTTP server:
+
+| Direction | Endpoint | Format |
+|---|---|---|
+| picture | `GET /v1/stream.mjpeg` | `multipart/x-mixed-replace`, latest frame first, `X-Pts-Us` per part |
+| sound | `GET /v1/audio.pcm` | `audio/L16; rate=8000; channels=1`, chunked, played through Web Audio |
+| talk-back | `GET /v1/talk.ws` (WebSocket) | binary PCM S16LE 8 kHz; same one-at-a-time rule as `POST /v1/talk` |
+| state | `GET /v1/events` | SSE, the browser resumes with `Last-Event-ID` by itself |
+
+WebSocket exists only because browsers cannot stream an HTTP/1.1 request
+body; every other path is plain HTTP. The microphone needs a secure context,
+so hold-to-talk works on `localhost` or behind HTTPS, not on a plain
+`http://192.168.x.x` page.
+
+`scripts/agent-http-test.py --browser` additionally checks the page, the
+MJPEG and PCM streams and the WebSocket talk-back with a raw RFC 6455
+client.
+
 `scripts/agent-http-test.py` (standard library only) runs the whole contract
 against a running Agent: negotiation and authentication errors, the call
 command flow with idempotent replay and cooldown, snapshot age, exclusive

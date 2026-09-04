@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>门口机</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel-2: #1f232c; --text: #e8eaf0; --muted: #8b91a0;
+    --line: #262b36; --accent: #4f8cff; --ok: #2ecc71; --danger: #ff5f56; --warn: #f5b942;
+    --shadow: 0 10px 30px rgba(0,0,0,.35);
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f4f5f8; --panel: #ffffff; --panel-2: #eef0f4; --text: #161922; --muted: #6b7280;
+      --line: #e3e6ec; --shadow: 0 10px 30px rgba(20,30,60,.10);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", Inter, Roboto, sans-serif;
+    display: flex; flex-direction: column; min-height: 100dvh;
+    -webkit-tap-highlight-color: transparent;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 14px 18px;
+    padding-top: max(14px, env(safe-area-inset-top));
+  }
+  header h1 { font-size: 17px; font-weight: 600; margin: 0; letter-spacing: .2px; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px;
+    background: var(--panel-2); color: var(--muted); font-size: 13px; font-weight: 500;
+  }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .pill.ringing .dot { background: var(--warn); animation: pulse 1s infinite; }
+  .pill.connected .dot { background: var(--ok); }
+  .pill.offline .dot { background: var(--danger); }
+  @keyframes pulse { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.6); opacity: .5; } }
+  .spacer { flex: 1; }
+  button.icon {
+    background: transparent; border: 0; color: var(--muted); width: 36px; height: 36px; border-radius: 10px; cursor: pointer;
+  }
+  button.icon:hover { background: var(--panel-2); color: var(--text); }
+  main { flex: 1; display: flex; flex-direction: column; gap: 16px; padding: 0 18px 18px; max-width: 980px; width: 100%; margin: 0 auto; }
+  .video {
+    position: relative; background: #000; border-radius: 18px; overflow: hidden; box-shadow: var(--shadow);
+    aspect-ratio: 4 / 3; max-height: 62dvh; display: grid; place-items: center;
+  }
+  .video img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .video .badge {
+    position: absolute; left: 14px; top: 14px; padding: 6px 10px; border-radius: 10px; font-size: 12px;
+    background: rgba(0,0,0,.55); color: #fff; backdrop-filter: blur(6px);
+  }
+  .video .age { position: absolute; right: 14px; bottom: 12px; font-size: 12px; color: rgba(255,255,255,.7); }
+  .controls { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .ctl {
+    display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 14px 6px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 16px; color: var(--text);
+    cursor: pointer; user-select: none; -webkit-user-select: none; touch-action: none;
+    transition: transform .08s ease, background .15s ease, opacity .15s ease;
+  }
+  .ctl:active { transform: scale(.97); }
+  .ctl[disabled] { opacity: .35; cursor: not-allowed; transform: none; }
+  .ctl .ring { width: 54px; height: 54px; border-radius: 50%; display: grid; place-items: center; color: #fff; }
+  .ctl.answer .ring { background: var(--ok); }
+  .ctl.unlock .ring { background: var(--accent); }
+  .ctl.hangup .ring { background: var(--danger); }
+  .ctl.talk .ring { background: #6b5cff; }
+  .ctl.talk.active { background: var(--panel-2); }
+  .ctl.talk.active .ring { box-shadow: 0 0 0 6px rgba(107,92,255,.25); }
+  .ctl span { font-size: 13px; color: var(--muted); }
+  .ctl svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .log {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 10px 14px;
+    max-height: 22dvh; overflow: auto; font-size: 13px;
+  }
+  .log div { display: flex; gap: 10px; padding: 4px 0; border-bottom: 1px dashed var(--line); }
+  .log div:last-child { border-bottom: 0; }
+  .log time { color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
+  .toast {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); padding: 10px 16px; border-radius: 12px;
+    background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow); font-size: 14px; opacity: 0;
+    transition: opacity .2s ease; pointer-events: none;
+  }
+  .toast.show { opacity: 1; }
+  dialog {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 16px; padding: 20px; width: min(92vw, 380px);
+    box-shadow: var(--shadow);
+  }
+  dialog::backdrop { background: rgba(0,0,0,.45); }
+  dialog h2 { margin: 0 0 12px; font-size: 16px; }
+  dialog label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 6px; }
+  dialog input { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); font: inherit; }
+  dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+  dialog button { padding: 8px 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); cursor: pointer; }
+  dialog button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .hint { font-size: 12px; color: var(--muted); }
+  @media (max-width: 520px) { .controls { gap: 8px; } .ctl { padding: 12px 4px; } .ctl .ring { width: 48px; height: 48px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">门口机</h1>
+  <span class="pill" id="status"><span class="dot"></span><span id="statusText">连接中</span></span>
+  <span class="spacer"></span>
+  <button class="icon" id="soundBtn" title="声音" aria-label="声音">
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/><path id="soundWave" d="M15.5 8.5a5 5 0 0 1 0 7M19 5a9 9 0 0 1 0 14"/></svg>
+  </button>
+  <button class="icon" id="settingsBtn" title="设置" aria-label="设置">
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+  </button>
+</header>
+
+<main>
+  <section class="video">
+    <img id="video" alt="门口画面">
+    <span class="badge" id="badge">离线</span>
+    <span class="age" id="age"></span>
+  </section>
+
+  <section class="controls">
+    <button class="ctl answer" id="answerBtn" disabled>
+      <span class="ring"><svg viewBox="0 0 24 24"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8.1 9.7a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.8 2.1z"/></svg></span>
+      <span>接听</span>
+    </button>
+    <button class="ctl unlock" id="unlockBtn" disabled>
+      <span class="ring"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg></span>
+      <span>开锁</span>
+    </button>
+    <button class="ctl hangup" id="hangupBtn" disabled>
+      <span class="ring"><svg viewBox="0 0 24 24" style="transform:rotate(135deg)"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8.1 9.7a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.8 2.1z"/></svg></span>
+      <span>挂断</span>
+    </button>
+    <button class="ctl talk" id="talkBtn" disabled>
+      <span class="ring"><svg viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5M8 22h8"/></svg></span>
+      <span id="talkLabel">按住说话</span>
+    </button>
+  </section>
+
+  <section class="log" id="log"></section>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<dialog id="settings">
+  <h2>连接设置</h2>
+  <label for="tokenInput">访问令牌（Agent 的 bearer token）</label>
+  <input id="tokenInput" placeholder="留空表示 Agent 未开启鉴权" autocomplete="off">
+  <p class="hint" id="apiHint"></p>
+  <div class="row">
+    <button id="settingsCancel">取消</button>
+    <button class="primary" id="settingsSave">保存</button>
+  </div>
+</dialog>
+
+<script>
+(() => {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const state = { phase: 'idle', owner: 'none', online: false, token: localStorage.getItem('padToken') || '', seq: 0 };
+  const el = {
+    status: $('status'), statusText: $('statusText'), badge: $('badge'), age: $('age'), video: $('video'),
+    answer: $('answerBtn'), unlock: $('unlockBtn'), hangup: $('hangupBtn'), talk: $('talkBtn'), talkLabel: $('talkLabel'),
+    log: $('log'), toast: $('toast'), settings: $('settings'), tokenInput: $('tokenInput'), soundWave: $('soundWave'),
+  };
+  const base = location.origin;
+  const withToken = (path) => base + path + (state.token ? (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(state.token) : '');
+  const headers = () => Object.assign({ 'Accept': 'application/json' }, state.token ? { 'Authorization': 'Bearer ' + state.token } : {});
+
+  // ---------- UI helpers ----------
+  let toastTimer;
+  function toast(text) {
+    el.toast.textContent = text; el.toast.classList.add('show');
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => el.toast.classList.remove('show'), 2200);
+  }
+  function logLine(text) {
+    const row = document.createElement('div');
+    const t = document.createElement('time'); t.textContent = new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    const s = document.createElement('span'); s.textContent = text;
+    row.append(t, s); el.log.prepend(row);
+    while (el.log.children.length > 60) el.log.lastChild.remove();
+  }
+  function render() {
+    const labels = { idle: '空闲', ringing: '门口有人呼叫', connected: state.owner === 'remote' ? '通话中' : '室内机已接听', ending: '结束中' };
+    el.status.className = 'pill ' + (state.online ? state.phase : 'offline');
+    el.statusText.textContent = state.online ? labels[state.phase] || state.phase : '离线';
+    el.badge.textContent = state.online ? (state.phase === 'idle' ? '最近画面' : '实时') : '离线';
+    const ringing = state.phase === 'ringing';
+    const mine = state.phase === 'connected' && state.owner === 'remote';
+    el.answer.disabled = !(state.online && ringing);
+    el.unlock.disabled = !(state.online && (ringing || mine));
+    el.hangup.disabled = !(state.online && (ringing || mine));
+    el.talk.disabled = !(state.online && mine);
+    document.title = ringing ? '🔔 门口有人呼叫' : '门口机';
+  }
+
+  // ---------- Ringtone (Web Audio, no assets) ----------
+  let audioCtx = null, ringTimer = null, soundOn = localStorage.getItem('padSound') !== 'off';
+  function ctx() { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); if (audioCtx.state === 'suspended') audioCtx.resume(); return audioCtx; }
+  function beep(freq, at, dur) {
+    const c = ctx(); const o = c.createOscillator(); const g = c.createGain();
+    o.type = 'sine'; o.frequency.value = freq; g.gain.value = 0.0001;
+    g.gain.setValueAtTime(0.0001, at); g.gain.exponentialRampToValueAtTime(0.2, at + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+    o.connect(g).connect(c.destination); o.start(at); o.stop(at + dur + 0.05);
+  }
+  function startRing() {
+    if (ringTimer || !soundOn) return;
+    const play = () => { try { const t = ctx().currentTime; beep(880, t, 0.25); beep(660, t + 0.3, 0.25); } catch (e) {} };
+    play(); ringTimer = setInterval(play, 1600);
+  }
+  function stopRing() { clearInterval(ringTimer); ringTimer = null; }
+  $('soundBtn').onclick = () => { soundOn = !soundOn; localStorage.setItem('padSound', soundOn ? 'on' : 'off'); el.soundWave.style.display = soundOn ? '' : 'none'; toast(soundOn ? '铃声已开启' : '铃声已关闭'); if (!soundOn) stopRing(); else ctx(); };
+  el.soundWave.style.display = soundOn ? '' : 'none';
+  document.addEventListener('pointerdown', () => { if (soundOn) ctx(); }, { once: true });
+
+  // ---------- Door media: MJPEG picture + PCM audio ----------
+  let audioAbort = null, mediaLive = false;
+  function showSnapshot() { el.video.src = withToken('/v1/snapshot.jpg?t=' + Date.now()); }
+  async function startMedia() {
+    if (mediaLive) return; mediaLive = true;
+    el.video.src = withToken('/v1/stream.mjpeg?t=' + Date.now());
+    if (!soundOn) return;
+    audioAbort = new AbortController();
+    try {
+      const resp = await fetch(withToken('/v1/audio.pcm'), { headers: { 'Accept': 'audio/L16' }, signal: audioAbort.signal });
+      if (!resp.ok || !resp.body) return;
+      const c = ctx(); let playhead = 0; const reader = resp.body.getReader(); let carry = new Uint8Array(0);
+      for (;;) {
+        const { value, done } = await reader.read(); if (done) break;
+        let bytes = value; if (carry.length) { const m = new Uint8Array(carry.length + value.length); m.set(carry); m.set(value, carry.length); bytes = m; }
+        const usable = bytes.length - (bytes.length % 2); carry = bytes.slice(usable);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, usable); const n = usable / 2; if (!n) continue;
+        const buf = c.createBuffer(1, n, 8000); const data = buf.getChannelData(0);
+        for (let i = 0; i < n; i++) data[i] = view.getInt16(i * 2, false) / 32768;
+        const src = c.createBufferSource(); src.buffer = buf; src.connect(c.destination);
+        playhead = Math.max(playhead, c.currentTime + 0.08); src.start(playhead); playhead += buf.duration;
+      }
+    } catch (e) { /* aborted or network */ }
+  }
+  function stopMedia() { mediaLive = false; if (audioAbort) { audioAbort.abort(); audioAbort = null; } showSnapshot(); }
+  setInterval(() => { if (state.online && !mediaLive) showSnapshot(); }, 15000);
+
+  // ---------- Talk-back: hold to talk over WebSocket ----------
+  let talk = null;
+  async function startTalk() {
+    if (talk) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('麦克风需要 https 或 localhost 环境'); return; }
+    el.talk.classList.add('active'); el.talkLabel.textContent = '说话中…';
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
+      const c = ctx(); const source = c.createMediaStreamSource(stream);
+      const proc = c.createScriptProcessor(4096, 1, 1);
+      const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/v1/talk.ws' + (state.token ? '?token=' + encodeURIComponent(state.token) : ''));
+      ws.binaryType = 'arraybuffer';
+      ws.onmessage = (m) => { try { const r = JSON.parse(m.data); if (r.error) { toast('对讲被拒绝：' + r.error); stopTalk(); } } catch (e) {} };
+      ws.onclose = () => { if (talk) stopTalk(); };
+      const ratio = c.sampleRate / 8000; let acc = 0;
+      proc.onaudioprocess = (e) => {
+        if (ws.readyState !== 1) return;
+        const input = e.inputBuffer.getChannelData(0); const out = new Int16Array(Math.floor((input.length - acc) / ratio) + 1); let n = 0;
+        for (let i = acc; i < input.length; i += ratio) {
+          const lo = Math.floor(i), hi = Math.min(lo + 1, input.length - 1), f = i - lo;
+          const v = input[lo] * (1 - f) + input[hi] * f; out[n++] = Math.max(-32768, Math.min(32767, Math.round(v * 32767)));
+        }
+        acc = (acc + n * ratio) - input.length; if (acc < 0) acc = 0;
+        ws.send(out.buffer.slice(0, n * 2));
+      };
+      source.connect(proc); proc.connect(c.destination);
+      talk = { stream, source, proc, ws };
+    } catch (e) { toast('无法打开麦克风'); stopTalk(); }
+  }
+  function stopTalk() {
+    el.talk.classList.remove('active'); el.talkLabel.textContent = '按住说话';
+    if (!talk) return; const t = talk; talk = null;
+    try { t.proc.disconnect(); t.source.disconnect(); } catch (e) {}
+    try { t.stream.getTracks().forEach((x) => x.stop()); } catch (e) {}
+    try { t.ws.close(); } catch (e) {}
+  }
+  el.talk.addEventListener('pointerdown', (e) => { e.preventDefault(); if (!el.talk.disabled) startTalk(); });
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach((ev) => el.talk.addEventListener(ev, stopTalk));
+
+  // ---------- Commands ----------
+  let counter = 0;
+  async function command(action) {
+    const id = 'pad-' + Date.now() + '-' + (++counter);
+    const resp = await fetch(base + '/v1/call/' + action, { method: 'POST', headers: Object.assign(headers(), { 'Content-Type': 'application/json' }), body: JSON.stringify({ command_id: id }) });
+    const result = await resp.json().catch(() => ({}));
+    if (resp.status === 401) { openSettings('令牌无效'); throw new Error('unauthorized'); }
+    if (!result.ok) { toast({ claim: '接听', unlock: '开锁', hangup: '挂断' }[action] + '失败：' + (result.error || resp.status)); throw new Error(result.error || resp.status); }
+    return result;
+  }
+  el.answer.onclick = async () => { try { await command('claim'); logLine('已接听'); } catch (e) {} };
+  el.hangup.onclick = async () => { try { await command('hangup'); logLine('已挂断'); } catch (e) {} };
+  el.unlock.onclick = async () => {
+    try {
+      if (state.phase === 'ringing') { await command('claim'); logLine('已接听'); }
+      await command('unlock'); toast('已开锁'); logLine('已开锁');
+    } catch (e) {}
+  };
+
+  // ---------- Events (SSE) ----------
+  let source = null;
+  function applyState(s) {
+    state.phase = s.phase; state.owner = s.owner; state.online = true; render();
+    if (s.phase === 'idle') { stopRing(); stopMedia(); } else { startMedia(); if (s.phase === 'ringing') startRing(); else stopRing(); }
+  }
+  function connectEvents() {
+    if (source) source.close();
+    source = new EventSource(withToken('/v1/events'));
+    source.onopen = () => { state.online = true; render(); };
+    source.onerror = () => { state.online = false; render(); };
+    source.addEventListener('snapshot', (e) => { const ev = JSON.parse(e.data); applyState(ev.state); });
+    source.addEventListener('call_started', (e) => { const ev = JSON.parse(e.data); logLine('门口 ' + ev.door_id + ' 呼叫'); state.phase = 'ringing'; state.owner = 'none'; state.online = true; render(); startMedia(); startRing(); });
+    source.addEventListener('pad_answered', () => { logLine('室内机已接听'); state.phase = 'connected'; state.owner = 'pad'; render(); stopRing(); });
+    source.addEventListener('remote_answered', () => { state.phase = 'connected'; state.owner = 'remote'; render(); stopRing(); });
+    source.addEventListener('unlocked', (e) => { const ev = JSON.parse(e.data); logLine(ev.by === 'remote' ? '已开锁' : '室内机开锁'); });
+    source.addEventListener('call_ended', (e) => { const ev = JSON.parse(e.data); logLine('通话结束（' + ev.reason + '）'); state.phase = 'idle'; state.owner = 'none'; render(); stopRing(); stopMedia(); stopTalk(); });
+    source.addEventListener('agent_error', (e) => { const ev = JSON.parse(e.data); logLine('Agent 错误：' + ev.message); });
+  }
+  async function probe() {
+    try {
+      const resp = await fetch(base + '/v1/state', { headers: headers() });
+      if (resp.status === 401) { openSettings('需要访问令牌'); return false; }
+      const s = await resp.json(); applyState(s); $('title').textContent = s.room_id ? '门口机 · ' + s.room_id : '门口机';
+      return true;
+    } catch (e) { state.online = false; render(); return false; }
+  }
+
+  // ---------- Settings ----------
+  function openSettings(hint) { el.tokenInput.value = state.token; $('apiHint').textContent = hint || ('Agent: ' + base); el.settings.showModal(); }
+  $('settingsBtn').onclick = () => openSettings();
+  $('settingsCancel').onclick = () => el.settings.close();
+  $('settingsSave').onclick = async () => { state.token = el.tokenInput.value.trim(); localStorage.setItem('padToken', state.token); el.settings.close(); if (await probe()) connectEvents(); };
+
+  // ---------- Snapshot age ----------
+  el.video.addEventListener('load', () => { el.age.textContent = ''; });
+  async function refreshAge() {
+    if (mediaLive || !state.online) { el.age.textContent = ''; return; }
+    try { const r = await fetch(withToken('/v1/snapshot.jpg'), { method: 'GET', headers: { 'Accept': 'image/jpeg' } }); const age = Number(r.headers.get('X-Frame-Age-Ms') || 0); el.age.textContent = age > 2000 ? Math.round(age / 1000) + ' 秒前' : '刚刚'; } catch (e) {}
+  }
+  setInterval(refreshAge, 5000);
+
+  render();
+  probe().then((ok) => { if (ok) connectEvents(); else if (!el.settings.open) setTimeout(() => probe().then((ok2) => ok2 && connectEvents()), 3000); });
+})();
+</script>
+</body>
+</html>
