@@ -1,0 +1,45 @@
+[intercom]
+bridge_interface = "br-lan"
+# Determine these by swapping cables or observing switch counters.
+door_interface = "eth0.2"
+pad_interface = "eth0.1"
+door_id = "M00000000000"
+room_id = "S00000000000"
+door_ip = "192.168.124.2"
+room_ip = "192.168.124.61"
+# Obtain both with: tcpdump -eni br-lan 'udp port 10000'
+door_mac = "00:00:00:00:00:02"
+pad_mac = "00:00:00:00:00:3d"
+control_port = 10000
+discovery_port = 10008
+
+[agent]
+# Legacy PAG1 WebSocket. Use 0.0.0.0 only with WSS/mTLS or an isolated trusted network.
+listen = "127.0.0.1:9443"
+# HTTP control plane (REST + Server-Sent Events), see docs/openapi.yaml.
+http_listen = "127.0.0.1:8080"
+# Bearer token required on every control-plane request; empty = no auth (development only).
+token = ""
+# Serve Swagger UI at /swagger for manual testing.
+swagger = false
+
+[media]
+# lite never decodes untrusted JPEG on the MT7628.
+engine = "lite"
+fps = 8
+width = 320
+height = 240
+ffmpeg = "ffmpeg"
+# Pre-roll buffer of door video/audio kept in the Agent's memory (seconds, 0 = off) and its byte cap.
+history_secs = 5
+history_max_kib = 2048
+
+[coexistence]
+mode = "manual"
+nfqueue = 30
+owner_timeout_ms = 2000
+
+[security]
+unlock_cooldown_ms = 1000
+virtual_unlock_ms = 1500
+max_call_seconds = 300

@@ -1,0 +1,7 @@
+/target/
+*.log
+pad-gateway.toml
+.matter-state/
+.hap-state/
+.DS_Store
+wip/

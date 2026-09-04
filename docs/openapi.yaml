@@ -1,0 +1,562 @@
+openapi: 3.1.0
+info:
+  title: pad-gateway Agent control plane
+  version: "1"
+  description: |
+    Control plane of a `pad-gateway` Agent: the process that captures the
+    PENGUIN0 intercom traffic, arbitrates who owns a call, and injects the
+    answer / unlock / hangup packets. Backends (Matter, HomeKit, Home
+    Assistant, Homebridge plugins) talk to it over plain HTTP/1.1.
+
+    ## Planes
+
+    * **Control plane** — this document. Requests are REST; the downstream
+      event feed is a Server-Sent Events stream (`GET /v1/events`).
+    * **Data plane** — RTSP. `GET /v1/media` returns the RTSP URL. Video is
+      RTP/JPEG (RFC 2435) and audio is PCMU, both without re-encoding and with
+      RTP timestamps, so the two stay in sync. Talk-back uses the ONVIF
+      backchannel when the client supports it; `POST /v1/talk` is the
+      transitional alternative.
+
+    ## Content negotiation (mandatory)
+
+    * Every request with a body MUST carry `Content-Type`. An unsupported or
+      missing type is answered with `415 Unsupported Media Type`.
+    * Every request MUST carry `Accept`. REST resources accept
+      `application/json`, the event feed accepts `text/event-stream`, the
+      snapshot accepts `image/jpeg`. A missing or unsupported `Accept` is
+      answered with `406 Not Acceptable` whose body lists the supported
+      media types. Quality values and multiple candidates are honoured; the
+      first supported candidate in preference order wins.
+    * Every response carries `Content-Type`, including error responses.
+    * Media types carry the codec version as a parameter
+      (`application/json; v=1`). Future encodings such as
+      `application/cbor; v=1` are introduced purely by adding candidates to
+      `Accept` / `Content-Type`; `GET /v1/` lists what the server supports.
+
+    ## Events and reconnects
+
+    Events carry a monotonically increasing `seq`. The server closes the
+    event stream after a random 5–10 minutes; clients reconnect with
+    `Last-Event-ID` and receive every event they missed while the sequence
+    is still inside the server's ring buffer. When it is not, the stream
+    starts with a `snapshot` event so the client can rebuild its state. A
+    comment line is sent every 15 s as a heartbeat.
+
+    ## Commands and idempotency
+
+    Every command carries a client-chosen `command_id`. The Agent keeps the
+    result of recent commands and replays it when the same `command_id` is
+    sent again, so a retried request can never unlock twice.
+
+    ## Authentication
+
+    `Authorization: Bearer <token>` on every request, including the event
+    stream. The same token is used for the RTSP data plane. A server started
+    without a token (development only) accepts unauthenticated requests.
+  license:
+    name: MIT OR Apache-2.0
+
+servers:
+  - url: http://{host}:{port}
+    variables:
+      host:
+        default: 127.0.0.1
+      port:
+        default: "8080"
+
+security:
+  - bearer: []
+
+tags:
+  - name: discovery
+  - name: call
+  - name: events
+  - name: media
+
+paths:
+  /v1/:
+    get:
+      tags: [discovery]
+      summary: Server capabilities and supported media types
+      operationId: getInfo
+      responses:
+        "200":
+          description: Capabilities
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
+
+  /v1/state:
+    get:
+      tags: [call]
+      summary: Current call state
+      operationId: getState
+      responses:
+        "200":
+          description: Current state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
+
+  /v1/events:
+    get:
+      tags: [events]
+      summary: Server-Sent Events feed of call state changes
+      operationId: streamEvents
+      description: |
+        `Accept: text/event-stream` is required. Each SSE message has
+        `id:` set to the event `seq`, `event:` set to the event `type`, and
+        `data:` holding the JSON `Event` object. The first message is either
+        the replay of missed events (when `Last-Event-ID` is inside the ring
+        buffer) or a `snapshot` event.
+      parameters:
+        - in: header
+          name: Last-Event-ID
+          required: false
+          schema:
+            type: string
+          description: Sequence number of the last event the client processed.
+      responses:
+        "200":
+          description: Event stream
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-cache
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE framing of `Event` objects.
+              examples:
+                ring:
+                  value: |
+                    id: 42
+                    event: call_started
+                    data: {"seq":42,"at_ms":1788470000000,"type":"call_started","session_id":"43179387","door_id":"M00000000000","room_id":"S00000000000"}
+
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
+
+  /v1/call/claim:
+    post:
+      tags: [call]
+      summary: Answer the ringing call as the remote owner
+      operationId: claimCall
+      requestBody:
+        $ref: "#/components/requestBodies/Command"
+      responses:
+        "200":
+          $ref: "#/components/responses/CommandOk"
+        "409":
+          $ref: "#/components/responses/CommandRejected"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+
+  /v1/call/unlock:
+    post:
+      tags: [call]
+      summary: Open the door
+      description: |
+        Accepted only while the remote owner (the caller of `claim`) has the
+        current call, and at most once per cooldown period. The Agent never
+        unlocks for a call the physical Pad answered.
+      operationId: unlockDoor
+      requestBody:
+        $ref: "#/components/requestBodies/Command"
+      responses:
+        "200":
+          $ref: "#/components/responses/CommandOk"
+        "409":
+          $ref: "#/components/responses/CommandRejected"
+        "429":
+          description: Unlock cooldown active
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+
+  /v1/call/hangup:
+    post:
+      tags: [call]
+      summary: End the current call
+      operationId: hangupCall
+      requestBody:
+        $ref: "#/components/requestBodies/Command"
+      responses:
+        "200":
+          $ref: "#/components/responses/CommandOk"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+
+  /v1/snapshot.jpg:
+    get:
+      tags: [media]
+      summary: Most recent door frame
+      operationId: getSnapshot
+      description: "Requires `Accept: image/jpeg`. Returns the last JPEG the door station sent, unmodified."
+      responses:
+        "200":
+          description: JPEG image
+          headers:
+            X-Frame-Age-Ms:
+              description: Milliseconds since the door station produced this frame, on the Agent's clock. Large values mean the last call ended a while ago.
+              schema:
+                type: integer
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: No frame received yet
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
+
+  /v1/media:
+    get:
+      tags: [media]
+      summary: Where and how to receive the live media
+      operationId: getMedia
+      responses:
+        "200":
+          description: Media description
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MediaInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "406":
+          $ref: "#/components/responses/NotAcceptable"
+
+  /v1/talk:
+    post:
+      tags: [media]
+      summary: Send talk-back audio to the door station
+      operationId: postTalk
+      description: |
+        Transitional talk-back path for clients without an RTSP backchannel.
+        The body is raw PCM S16LE, 8 kHz, mono, sent with
+        `Transfer-Encoding: chunked` for as long as the caller speaks. Audio is
+        forwarded only while the remote owner has the call; otherwise the
+        request is rejected with `409`.
+      requestBody:
+        required: true
+        content:
+          "audio/L16; rate=8000; channels=1":
+            schema:
+              type: string
+              format: binary
+      responses:
+        "204":
+          description: Audio accepted until the body ended
+        "409":
+          $ref: "#/components/responses/CommandRejected"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "415":
+          $ref: "#/components/responses/UnsupportedMediaType"
+
+  /openapi.yaml:
+    get:
+      tags: [discovery]
+      summary: This document
+      operationId: getOpenApi
+      security: []
+      responses:
+        "200":
+          description: OpenAPI document
+          content:
+            application/yaml:
+              schema:
+                type: string
+
+  /swagger:
+    get:
+      tags: [discovery]
+      summary: Swagger UI (only when enabled on the server)
+      operationId: getSwagger
+      security: []
+      responses:
+        "200":
+          description: HTML page rendering `/openapi.yaml`
+          content:
+            text/html:
+              schema:
+                type: string
+        "404":
+          description: Swagger UI disabled
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+
+  requestBodies:
+    Command:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CommandRequest"
+
+  responses:
+    CommandOk:
+      description: Command accepted (or replayed from the idempotency cache)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CommandResult"
+    CommandRejected:
+      description: The call state does not allow this command
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CommandResult"
+    BadRequest:
+      description: Malformed body
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Missing or wrong bearer token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotAcceptable:
+      description: No supported media type in `Accept`
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/NegotiationError"
+    UnsupportedMediaType:
+      description: Request `Content-Type` not supported
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/NegotiationError"
+
+  schemas:
+    ApiInfo:
+      type: object
+      required: [api_version, agent_id, media_types, capabilities]
+      properties:
+        api_version:
+          type: string
+          example: "1"
+        agent_id:
+          type: string
+          example: fake-pad-cap
+        media_types:
+          type: array
+          description: Media types the server can produce and consume, with codec version parameters.
+          items:
+            type: string
+          example: ["application/json; v=1", "text/event-stream", "image/jpeg"]
+        capabilities:
+          type: array
+          items:
+            type: string
+          example: ["events", "snapshot", "rtsp", "talk"]
+
+    CallPhase:
+      type: string
+      enum: [idle, ringing, connected, ending]
+
+    Owner:
+      type: string
+      enum: [none, pad, remote]
+
+    CallState:
+      type: object
+      required: [phase, owner, agent_id, connected, uptime_ms]
+      properties:
+        phase:
+          $ref: "#/components/schemas/CallPhase"
+        owner:
+          $ref: "#/components/schemas/Owner"
+        session_id:
+          type: [string, "null"]
+          description: Current call session, as a decimal string (64-bit safe).
+        door_id:
+          type: [string, "null"]
+        room_id:
+          type: [string, "null"]
+        since_ms:
+          type: [integer, "null"]
+          description: Unix time in milliseconds the phase was entered.
+        agent_id:
+          type: string
+        connected:
+          type: boolean
+          description: Whether the Agent currently sees the intercom link.
+        uptime_ms:
+          type: integer
+
+    Event:
+      type: object
+      required: [seq, at_ms, type]
+      properties:
+        seq:
+          type: integer
+          format: int64
+        at_ms:
+          type: integer
+          format: int64
+          description: Unix time in milliseconds.
+        type:
+          type: string
+          enum: [snapshot, call_started, pad_answered, remote_answered, unlocked, call_ended, agent_error]
+        state:
+          $ref: "#/components/schemas/CallState"
+          description: Present on `snapshot`.
+        session_id:
+          type: string
+          description: Present on call events.
+        door_id:
+          type: string
+        room_id:
+          type: string
+        reason:
+          type: string
+          description: Present on `call_ended`.
+        by:
+          $ref: "#/components/schemas/Owner"
+          description: Present on `unlocked`.
+        message:
+          type: string
+          description: Present on `agent_error`.
+
+    CommandRequest:
+      type: object
+      required: [command_id]
+      properties:
+        command_id:
+          type: string
+          description: Client-chosen idempotency key, unique per backend.
+          example: hap-1788470000-17
+
+    CallError:
+      type: string
+      enum: [not_ringing, pad_owns_call, unlock_not_allowed, unlock_cooldown, no_call, agent_offline]
+
+    CommandResult:
+      type: object
+      required: [command_id, ok]
+      properties:
+        command_id:
+          type: string
+        ok:
+          type: boolean
+        error:
+          $ref: "#/components/schemas/CallError"
+        replayed:
+          type: boolean
+          description: True when the result came from the idempotency cache.
+
+    MediaInfo:
+      type: object
+      required: [video, audio]
+      properties:
+        rtsp_url:
+          type: [string, "null"]
+          example: rtsp://192.168.124.1:8554/door
+          description: Absent while the RTSP data plane is not running.
+        video:
+          type: object
+          required: [codec, width, height]
+          properties:
+            codec:
+              type: string
+              const: jpeg
+            width:
+              type: integer
+            height:
+              type: integer
+        audio:
+          type: object
+          required: [codec, sample_rate, channels]
+          properties:
+            codec:
+              type: string
+              enum: [pcmu, pcm_s16le]
+            sample_rate:
+              type: integer
+              const: 8000
+            channels:
+              type: integer
+              const: 1
+        talk:
+          type: boolean
+          description: Whether talk-back is accepted right now.
+        history_ms:
+          type: integer
+          description: Configured pre-roll buffer window (media.history_secs); 0 means no buffering.
+        buffered_ms:
+          type: integer
+          description: Span of video/audio currently held in the pre-roll buffer.
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+
+    NegotiationError:
+      type: object
+      required: [error, supported]
+      properties:
+        error:
+          type: string
+          enum: [not_acceptable, unsupported_media_type]
+        supported:
+          type: array
+          items:
+            type: string

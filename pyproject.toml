@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pad-intercom"
+version = "0.1.0"
+description = "Protocol analyzer and LAN client for the captured PENGUIN0 intercom"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+pad-analyze = "pad_intercom.analyze:main"
+pad-intercom = "pad_intercom.service:main"
+
+[tool.setuptools.packages.find]
+include = ["pad_intercom*"]
