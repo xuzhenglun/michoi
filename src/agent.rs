@@ -26,7 +26,10 @@ use crate::config::IntercomConfig;
 #[cfg(all(target_os = "linux", feature = "linux-packet"))]
 use crate::ethernet::{build_udp_ipv4, EthernetUdp, MacAddress};
 #[cfg(all(target_os = "linux", feature = "linux-packet"))]
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+#[cfg(all(target_os = "linux", feature = "linux-packet"))]
+use portable_atomic::AtomicU64;
+#[cfg(all(target_os = "linux", feature = "linux-packet"))]
+use std::sync::atomic::{AtomicU32, Ordering};
 #[cfg(all(target_os = "linux", feature = "linux-packet"))]
 use tokio::sync::broadcast;
 
