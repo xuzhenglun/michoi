@@ -17,10 +17,15 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tokio::net::UdpSocket;
 
+use std::path::PathBuf;
+
 use crate::protocol::{
-    audio_packet, jpeg_packets, session_control, split_coalesced, Endpoints, Message, Station,
-    FAMILY_SESSION, MEDIA_AUDIO, OP_ANSWER, OP_HANGUP, OP_KEEPALIVE, OP_MEDIA, OP_REPLY, OP_UNLOCK,
+    audio_packet, elevator_request, jpeg_packets, monitor_request, packet, session_control,
+    split_coalesced, Endpoints, JpegReassembler, Message, Station, FAMILY_ELEVATOR, FAMILY_MONITOR,
+    FAMILY_SESSION, MEDIA_AUDIO, OP_ANSWER, OP_HANGUP, OP_KEEPALIVE, OP_MEDIA, OP_REPLY, OP_REQUEST, OP_UNLOCK,
 };
+
+use crate::door_station::AudioSink;
 
 /// The door's own identity and the room Pad it calls.
 #[derive(Debug, Clone)]
@@ -346,6 +351,186 @@ pub async fn run_emulator(
     receiver.abort();
     let observation = obs.lock().unwrap().clone();
     Ok(observation)
+}
+
+/// What the monitor viewer saw from the door camera.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct MonitorObservation {
+    pub capability_reply: bool,
+    pub jpeg_frames: u64,
+    pub audio_packets: u64,
+    pub audio_bytes: u64,
+    pub hangups: u64,
+}
+
+/// View `target`'s camera as the Pad, without a ring: send `00b8/01`, keep the
+/// session alive, and take in the door's video and audio (family `00b8`, same
+/// framing as a call). This is the exact peer of an incoming call, only the
+/// initiator and family tag differ. Runs until `duration`, a door hangup, or
+/// the future is dropped.
+pub async fn run_monitor(
+    us: Station,
+    target: Station,
+    frames_out: Option<PathBuf>,
+    duration: Option<Duration>,
+    sink: Option<AudioSink>,
+) -> Result<MonitorObservation> {
+    let mut us = us;
+    let dest = SocketAddr::new(target.ip.into(), crate::protocol::CONTROL_PORT);
+    let socket = Arc::new(UdpSocket::bind(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)).await?);
+    socket
+        .connect(dest)
+        .await
+        .with_context(|| format!("connecting to {dest}"))?;
+    if us.ip.is_unspecified() {
+        if let std::net::IpAddr::V4(local) = socket.local_addr()?.ip() {
+            us.ip = local;
+        }
+    }
+    if let Some(dir) = &frames_out {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating frames directory {}", dir.display()))?;
+    }
+    // The monitor endpoint block is [initiator (us) | target], reused for
+    // keepalive and hangup.
+    let block = {
+        let mut b = us.pack()?.to_vec();
+        b.extend_from_slice(&target.pack()?);
+        b
+    };
+    tracing::info!(
+        %dest, local = %socket.local_addr()?, us = %us.id, target = %target.id,
+        "monitor: requesting the door camera (00b8/01)"
+    );
+
+    let obs = Arc::new(std::sync::Mutex::new(MonitorObservation::default()));
+    let recv_socket = socket.clone();
+    let recv_obs = obs.clone();
+    let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+    let mut speaker = sink;
+    let receiver = tokio::spawn(async move {
+        let mut buf = vec![0_u8; 65_536];
+        let mut jpeg = JpegReassembler::default();
+        loop {
+            let Ok(size) = recv_socket.recv(&mut buf).await else {
+                break;
+            };
+            for raw in split_coalesced(&buf[..size]) {
+                let Ok(msg) = Message::parse(raw) else { continue };
+                if msg.family != FAMILY_MONITOR {
+                    continue;
+                }
+                match msg.opcode {
+                    OP_REPLY => {
+                        let mut o = recv_obs.lock().unwrap();
+                        if !o.capability_reply {
+                            o.capability_reply = true;
+                            tracing::info!("door accepted the monitor (00b8/03)");
+                        }
+                    }
+                    OP_HANGUP => {
+                        recv_obs.lock().unwrap().hangups += 1;
+                        tracing::info!("door ended the monitor (00b8/1e)");
+                        let _ = stop_tx.send(true);
+                    }
+                    OP_MEDIA => {
+                        let Some(media) = msg.media() else { continue };
+                        if media.media_type == MEDIA_AUDIO {
+                            let mut o = recv_obs.lock().unwrap();
+                            o.audio_packets += 1;
+                            o.audio_bytes += media.data.len() as u64;
+                            drop(o);
+                            if let Some(sp) = speaker.as_mut() {
+                                let _ = sp.write(media.data);
+                            }
+                        } else if let Some(frame) = jpeg.push(&media) {
+                            let n = {
+                                let mut o = recv_obs.lock().unwrap();
+                                o.jpeg_frames += 1;
+                                o.jpeg_frames
+                            };
+                            if let Some(dir) = &frames_out {
+                                let path = dir.join(format!("frame-{n:04}.jpg"));
+                                let _ = std::fs::write(path, &frame);
+                            }
+                            if n == 1 {
+                                tracing::info!("first video frame from the door camera");
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    socket
+        .send(&monitor_request(&us, &target)?)
+        .await
+        .context("sending monitor request")?;
+
+    let mut keepalive = tokio::time::interval(Duration::from_secs(1));
+    let deadline = duration.map(|d| tokio::time::Instant::now() + d);
+    loop {
+        if *stop_rx.borrow() {
+            break;
+        }
+        if let Some(deadline) = deadline {
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+        }
+        tokio::select! {
+            _ = keepalive.tick() => {
+                let _ = socket.send(&packet(FAMILY_MONITOR, OP_KEEPALIVE, 80, &block)).await;
+            }
+            _ = stop_rx.changed() => {}
+        }
+    }
+    // Stop viewing.
+    let _ = socket.send(&packet(FAMILY_MONITOR, OP_HANGUP, 80, &block)).await;
+    receiver.abort();
+    let observation = obs.lock().unwrap().clone();
+    Ok(observation)
+}
+
+/// Call the elevator to the requesting room's floor: send `0106/01` to the
+/// door station and wait for its `0106/02` acknowledgement. Returns whether the
+/// ack arrived within `timeout`.
+pub async fn request_elevator(
+    room_id: &str,
+    target: SocketAddr,
+    timeout: Duration,
+) -> Result<bool> {
+    let socket = UdpSocket::bind(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)).await?;
+    socket
+        .connect(target)
+        .await
+        .with_context(|| format!("connecting to {target}"))?;
+    socket
+        .send(&elevator_request(room_id)?)
+        .await
+        .context("sending elevator call")?;
+    tracing::info!(%target, room_id, "elevator: call sent (0106/01)");
+    let mut buf = vec![0_u8; 1024];
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match tokio::time::timeout_at(deadline, socket.recv(&mut buf)).await {
+            Ok(Ok(size)) => {
+                if let Ok(msg) = Message::parse(&buf[..size]) {
+                    if msg.family == FAMILY_ELEVATOR && msg.opcode != OP_REQUEST {
+                        tracing::info!("elevator acknowledged (0106/02)");
+                        return Ok(true);
+                    }
+                }
+            }
+            Ok(Err(error)) => return Err(error).context("waiting for the elevator ack"),
+            Err(_) => {
+                tracing::warn!("no elevator ack within {timeout:?}");
+                return Ok(false);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

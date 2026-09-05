@@ -10,6 +10,13 @@ pub const DISCOVERY_PORT: u16 = 10_008;
 pub const FAMILY_PAGE: u16 = 0x005d;
 pub const FAMILY_BOOTSTRAP: u16 = 0x0098;
 pub const FAMILY_SESSION: u16 = 0x00b7;
+/// Pad-initiated monitor (view a door camera without a ring). Structurally
+/// identical to the call family, endpoint block ordered [initiator][peer].
+pub const FAMILY_MONITOR: u16 = 0x00b8;
+/// Reach a door by station id through the building gateway (192.168.120.2).
+pub const FAMILY_SCAN: u16 = 0x008c;
+/// Elevator call: bring the car to the requesting room's floor.
+pub const FAMILY_ELEVATOR: u16 = 0x0106;
 pub const FAMILY_SNAPSHOT_NAME: u16 = 0x009b;
 pub const FAMILY_SNAPSHOT_DATA: u16 = 0x00b4;
 
@@ -20,6 +27,8 @@ pub const OP_UNLOCK: u32 = 0x06;
 pub const OP_MEDIA: u32 = 0x0a;
 pub const OP_KEEPALIVE: u32 = 0x0c;
 pub const OP_HANGUP: u32 = 0x1e;
+/// Monitor: the door signals its media stream is ready (00b8/0f).
+pub const OP_MONITOR_READY: u32 = 0x0f;
 
 pub const MEDIA_JPEG: u16 = 1;
 pub const MEDIA_AUDIO: u16 = 3;
@@ -146,14 +155,21 @@ impl<'a> Message<'a> {
         })
     }
 
+    /// True for the two session-shaped families: the call (`00b7`) and the
+    /// Pad-initiated monitor (`00b8`), which share header, endpoint block and
+    /// media framing.
+    pub fn is_session_like(&self) -> bool {
+        self.family == FAMILY_SESSION || self.family == FAMILY_MONITOR
+    }
+
     pub fn endpoints(&self) -> Option<Endpoints> {
-        (self.family == FAMILY_SESSION && self.body.len() >= 48)
+        (self.is_session_like() && self.body.len() >= 48)
             .then(|| Endpoints::parse(&self.body[..48]).ok())
             .flatten()
     }
 
     pub fn media(&self) -> Option<MediaFragment<'a>> {
-        if self.family != FAMILY_SESSION || self.opcode != OP_MEDIA || self.body.len() < 58 {
+        if !self.is_session_like() || self.opcode != OP_MEDIA || self.body.len() < 58 {
             return None;
         }
         let h = &self.body[48..58];
@@ -254,6 +270,38 @@ pub fn session_reply(endpoints: &Endpoints) -> Result<Vec<u8>, ProtocolError> {
         body.extend_from_slice(&value.to_le_bytes());
     }
     Ok(packet(FAMILY_SESSION, OP_REPLY, 96, &body))
+}
+
+/// The fixed capability descriptor in the Pad's `00b8/01` monitor request,
+/// verbatim from the capture (only the endpoints vary per call).
+pub const MONITOR_REQUEST_CAPABILITY: [u8; 92] = [
+    0x56, 0x49, 0x44, 0x45, 0x4f, 0x41, 0x01, 0x00, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x00,
+];
+
+/// Build the Pad's `00b8/01` monitor request: view `target`'s camera without a
+/// ring. The endpoint block is [initiator (us) | target], mirroring the call's
+/// [door | room] but with the caller first. Synthesized from the protocol.
+pub fn monitor_request(us: &Station, target: &Station) -> Result<Vec<u8>, ProtocolError> {
+    let mut body = Vec::with_capacity(140);
+    body.extend_from_slice(&us.pack()?);
+    body.extend_from_slice(&target.pack()?);
+    body.extend_from_slice(&MONITOR_REQUEST_CAPABILITY);
+    Ok(packet(FAMILY_MONITOR, OP_REQUEST, 172, &body))
+}
+
+/// Build the `0106/01` elevator call: bring the car to the requesting room's
+/// floor. The body carries only the room station id (IP zeroed on the wire);
+/// the floor is derived from the id by the elevator controller.
+pub fn elevator_request(room_id: &str) -> Result<Vec<u8>, ProtocolError> {
+    let room = Station::new(room_id, std::net::Ipv4Addr::UNSPECIFIED);
+    let mut body = room.pack()?.to_vec();
+    body.resize(42, 0);
+    Ok(packet(FAMILY_ELEVATOR, OP_REQUEST, 32, &body))
 }
 
 pub fn bootstrap_reply(room: &Station) -> Result<Vec<u8>, ProtocolError> {
@@ -464,6 +512,42 @@ mod builder_tests {
             }
         }
         None
+    }
+
+    /// The first standalone datagram of a family/opcode in a capture, whole
+    /// (not split by the unreliable declared length), if present.
+    fn captured_in(path: &str, family: u16, opcode: u32) -> Option<Vec<u8>> {
+        for record in read_udp(path).ok()? {
+            if let Ok(msg) = Message::parse(&record.payload) {
+                if msg.family == family && msg.opcode == opcode {
+                    return Some(record.payload.clone());
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn monitor_request_reproduces_the_captured_view() {
+        // The monitor capture is private and not in git; skip when absent.
+        let Some(capture) = captured_in("testdata/call-door.cap", FAMILY_MONITOR, OP_REQUEST) else {
+            eprintln!("skipped: testdata/call-door.cap is not present");
+            return;
+        };
+        // Endpoint block is [initiator | target]; rebuild from those two.
+        let us = Station::parse(&capture[32..56]).unwrap();
+        let target = Station::parse(&capture[56..80]).unwrap();
+        assert_eq!(monitor_request(&us, &target).unwrap(), capture);
+    }
+
+    #[test]
+    fn elevator_request_reproduces_the_captured_call() {
+        let Some(capture) = captured_in("testdata/call-door.cap", FAMILY_ELEVATOR, OP_REQUEST) else {
+            eprintln!("skipped: testdata/call-door.cap is not present");
+            return;
+        };
+        let room = Station::parse(&capture[32..56]).unwrap();
+        assert_eq!(elevator_request(&room.id).unwrap(), capture);
     }
 
     #[test]
