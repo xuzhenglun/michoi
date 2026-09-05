@@ -13,6 +13,7 @@ pub struct Config {
     pub media: MediaConfig,
     pub coexistence: CoexistenceConfig,
     pub security: SecurityConfig,
+    pub hap: HapConfig,
 }
 
 impl Default for Config {
@@ -23,6 +24,7 @@ impl Default for Config {
             media: MediaConfig::default(),
             coexistence: CoexistenceConfig::default(),
             security: SecurityConfig::default(),
+            hap: HapConfig::default(),
         }
     }
 }
@@ -302,6 +304,61 @@ impl Default for SecurityConfig {
             virtual_unlock_ms: 1_500,
             max_call_seconds: 300,
         }
+    }
+}
+
+/// Apple HomeKit (HAP over IP) exposure. See `src/hap.rs`. Control-only for
+/// now: a Lock (unlock), a Switch (call the elevator), and a Doorbell (an
+/// incoming call raises a notification). Live view / two-way audio are later
+/// phases and are compiled in only with the `hap` cargo feature.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HapConfig {
+    /// Expose the intercom to Apple Home. Needs a binary built with `--features hap`.
+    pub enabled: bool,
+    /// Accessory name shown in the Home app.
+    pub name: String,
+    /// 8-digit HomeKit setup code. Grouped ("031-45-154") or bare digits;
+    /// only the digits are read. Trivial codes are rejected by HomeKit.
+    pub pin: String,
+    /// TCP port the HAP server listens on.
+    pub port: u16,
+    /// Interface whose IPv4 is advertised; empty picks the first usable one.
+    pub interface: String,
+    /// Stable serial number; also seeds the accessory's HAP device id, so the
+    /// HomeKit identity survives reinstalls that keep this configuration.
+    pub serial: String,
+    /// Directory holding pairing state (keys and paired controllers).
+    pub storage: PathBuf,
+}
+
+impl Default for HapConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            name: "michoi".into(),
+            pin: "031-45-154".into(),
+            port: 51826,
+            interface: String::new(),
+            serial: "MICHOI-0000".into(),
+            storage: PathBuf::from("/etc/michoi/hap"),
+        }
+    }
+}
+
+impl HapConfig {
+    /// The 8 setup-code digits as HomeKit expects them, ignoring separators.
+    pub fn pin_digits(&self) -> Result<[u8; 8]> {
+        let digits: Vec<u8> = self
+            .pin
+            .bytes()
+            .filter(u8::is_ascii_digit)
+            .map(|b| b - b'0')
+            .collect();
+        anyhow::ensure!(digits.len() == 8, "hap.pin must have exactly 8 digits");
+        let mut out = [0u8; 8];
+        out.copy_from_slice(&digits);
+        Ok(out)
     }
 }
 

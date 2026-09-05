@@ -15,6 +15,9 @@ pub mod state;
 pub mod transport;
 pub mod wire_udp;
 
+#[cfg(feature = "hap")]
+pub mod hap;
+
 #[cfg(all(target_os = "linux", feature = "linux-packet"))]
 pub mod bridge;
 #[cfg(all(target_os = "linux", feature = "linux-packet"))]

@@ -55,9 +55,14 @@ export DYLD_FALLBACK_LIBRARY_PATH="$TC/lib${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_F
 #    - linker=rust-lld: Rust's own linker, no external ld/gcc.
 export RUSTFLAGS="-C target-cpu=mips32r2 -C target-feature=+soft-float,+crt-static -C linker=rust-lld -C linker-flavor=ld.lld -L $LINKDIR"
 
+# Cargo features for the device build. Defaults to the packet capture wire plus
+# the Apple HomeKit (HAP) controller. Override for a leaner binary, e.g.
+#   FEATURES=linux-packet bash scripts/build-mips-nosdk.sh
+FEATURES="${FEATURES:-linux-packet,hap}"
+
 "$TC/bin/cargo" build -Z build-std=std,panic_abort \
   --target "$TARGET" --release \
-  --no-default-features --features linux-packet
+  --no-default-features --features "$FEATURES"
 
 BIN="target/$TARGET/release/michoi"
 echo

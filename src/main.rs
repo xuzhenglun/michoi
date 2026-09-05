@@ -380,6 +380,7 @@ async fn main() -> Result<()> {
                 roster,
                 broadcast,
                 elevator_door,
+                hap: cfg.hap.clone(),
             };
             michoi::agent::run_agent(run).await?;
         }

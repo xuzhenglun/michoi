@@ -1173,6 +1173,7 @@ pub struct Run {
     pub roster: Vec<String>,
     pub broadcast: Ipv4Addr,
     pub elevator_door: Option<String>,
+    pub hap: crate::config::HapConfig,
 }
 
 /// Expand a short dialled number to a full station id using the local id's
@@ -1341,6 +1342,24 @@ pub async fn run_agent(run: Run) -> Result<()> {
         http = %run.server.listen,
         "Agent serving the HTTP control plane"
     );
+
+    // Apple HomeKit is another Controller over the same trait: spawn it
+    // alongside the HTTP control plane when enabled and compiled in.
+    #[cfg(feature = "hap")]
+    if run.hap.enabled {
+        let hap_agent = agent.clone();
+        let hap_config = run.hap.clone();
+        tokio::spawn(async move {
+            if let Err(error) = crate::hap::serve(hap_config, hap_agent).await {
+                tracing::error!(%error, "HAP server exited");
+            }
+        });
+    }
+    #[cfg(not(feature = "hap"))]
+    if run.hap.enabled {
+        tracing::warn!("hap.enabled is set but this binary was built without --features hap");
+    }
+
     crate::agent_server::serve(run.server, agent).await
 }
 

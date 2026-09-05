@@ -9,6 +9,10 @@ license = "MIT OR Apache-2.0"
 [features]
 default = []
 linux-packet = ["dep:libc"]
+# Apple HomeKit (HAP over IP) controller built on the vendored hap crate.
+# Control-only for P0 (Lock, elevator Switch, Doorbell notification); the
+# camera/RTP half is added later and pulls extra deps then.
+hap = ["dep:hap", "dep:if-addrs"]
 
 [dependencies]
 anyhow = "1.0"
@@ -26,6 +30,9 @@ tokio-tungstenite = "0.27"
 toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+hap = { path = "vendor/hap", optional = true }
+if-addrs = { version = "0.6", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { version = "0.2", optional = true }

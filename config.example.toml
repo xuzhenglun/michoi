@@ -75,3 +75,22 @@ unlock_cooldown_ms = 1000
 unlock_requires_answer = false
 virtual_unlock_ms = 1500
 max_call_seconds = 300
+
+[hap]
+# Expose the intercom to Apple Home over HAP. Needs a binary built with
+# `--features hap`. Control-only for now: a Lock (unlock), a Switch (call the
+# elevator to this floor), and a Doorbell (an incoming call raises a
+# notification). Live view / two-way audio are later phases.
+enabled = false
+# Name shown in the Home app.
+name = "michoi"
+# 8-digit HomeKit setup code. Change it; trivial codes are rejected by HomeKit.
+pin = "031-45-154"
+# TCP port for the HAP server.
+port = 51826
+# Interface whose IPv4 is advertised; empty = first usable one.
+interface = ""
+# Stable serial; also seeds the HAP device id, so the pairing survives reinstalls.
+serial = "MICHOI-0000"
+# Directory holding pairing state (keys, paired controllers).
+storage = "/etc/michoi/hap"
