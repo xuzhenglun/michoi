@@ -275,7 +275,7 @@
   let talk = null;
   async function startTalk() {
     if (talk) return;
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('麦克风需要 https 或 localhost 环境'); return; }
+    if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('需要安全环境（https 或 http://localhost）才能用摄像头/麦克风。用 SSH 转发后访问 http://localhost:8080'); return; }
     el.talk.classList.add('active'); el.talkLabel.textContent = '说话中…';
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
@@ -372,7 +372,9 @@
   let camera = null;
   async function startCamera() {
     if (camera) return;
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+    if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      toast('需要安全环境（https 或 http://localhost）才能用摄像头/麦克风。用 SSH 转发后访问 http://localhost:8080'); return;
+    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
       const video = document.createElement('video'); video.srcObject = stream; video.muted = true; await video.play();
@@ -390,7 +392,7 @@
       };
       ws.onclose = () => stopCamera();
       logLine('已开启本机摄像头');
-    } catch (e) { toast('无法打开摄像头'); }
+    } catch (e) { toast('无法打开摄像头：' + (e && e.name || e)); }
   }
   function stopCamera() {
     if (!camera) return;
