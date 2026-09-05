@@ -394,8 +394,8 @@
           canvas.toBlob((b) => {
             if (b && camera && ws.readyState === 1) b.arrayBuffer().then((buf) => { try { ws.send(buf); } catch (e) {} camera.busy = false; });
             else if (camera) camera.busy = false;
-          }, 'image/jpeg', 0.4);
-        }, 200);
+          }, 'image/jpeg', 0.5);
+        }, 80);
       };
       ws.onclose = () => stopCamera();
       logLine('已开启本机摄像头');
