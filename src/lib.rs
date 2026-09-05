@@ -10,9 +10,11 @@ pub mod media;
 pub mod pcap;
 pub mod protocol;
 pub mod replay_agent;
-pub mod socket_agent;
 pub mod state;
 pub mod transport;
+pub mod wire_udp;
 
 #[cfg(all(target_os = "linux", feature = "linux-packet"))]
 pub mod bridge;
+#[cfg(all(target_os = "linux", feature = "linux-packet"))]
+pub mod wire_tap;

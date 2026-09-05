@@ -23,11 +23,13 @@ Pad 未接听时成功；unlock 只在远程已接听时允许，默认 1 秒冷
   `EventLog`（事件环）、`CommandCache`（幂等缓存）、`MediaRing`（按时间和字节
   双上限的预录缓冲）。
 - `replay_agent`：进程内的 pcap 回放实现，走生产状态机和编码器，只是不注入。
-- `socket_agent`：用户态 Pad 端 Agent，绑 UDP 控制口扮演 Pad，接住 `emit-door`
-  合成门口机的寻呼/引导/会话握手，把门口视频/音频经同一 HTTP 控制面 fan-out；
-  后端的接听/开门/对讲以 Pad 身份回发给门口机。纯 tokio UDP、跨平台（不需
-  AF_PACKET），因此 `emit-door` ↔ `socket_agent` ↔ 浏览器 Pad 可在一台
-  笔记本上闭环，无需硬件和桥。
+- `agent`：真正的 Agent。核心（身份、通话状态机、事件/命令/媒体、HTTP 控制面）与
+  线路解耦，线路即 `Wire` trait，两种模式各一实现：`wire_udp`（`pad` 实体：本进程
+  就是 Pad，绑 UDP 控制口、自答握手、以 Pad 身份收发，跨平台）和 `wire_tap`
+  （`tap` 旁路：物理 Pad 仍在，AF_PACKET 旁听桥、必要时注入并下 nft 静默物理 Pad，
+  仅 Linux）。身份只配一个 `device_id`（Pad 的房间 station id）；Pad IP、门口机身份、
+  两头 MAC 由 UDP 10008 发现或首次呼叫学习后钉死（TOFU），后续同 ID 换 IP/MAC 只告警。
+  `pad` 模式下 `tools emit-door` ↔ `agent` ↔ 浏览器 Pad 可在一台笔记本上闭环，无需硬件。
 - `emitter`：从协议合成的软件门口机模拟器。按配置的门口机/房间身份，按实机验证的
   呼叫顺序发包：`005d/01` 寻呼 ×10（振铃触发）→ `0098/01` bootstrap → `00b7/01`
   ring ×3 → `00b7/0a` 视频 + keepalive；**音频在收到 Pad 的 `00b7/05` answer 后才发**
@@ -36,8 +38,8 @@ Pad 未接听时成功；unlock 只在远程已接听时允许，默认 1 秒冷
   connect 到 Pad 后的本机出口地址自动取，写进包体供 Pad 回包。发出后监听 Pad 的回包
   （capability/answer/unlock/voice/hangup）并报告、播放。`session_request`、`jpeg_packets`、
   `page_request`、`bootstrap_request` 有“合成==抓包”单测自证。UDP 10008 的设备 ID→IP 查询（类 ARP：广播 `01+room_id`，Pad 从自身地址回
-  `02+room_id`，取应答源 IP）由 `resolve_pad` 实现，`resolve` 子命令使用，也已内建进
-  `emit-door`：省略目标即按 `--room-id` 自动发现 Pad IP 后再呼叫。用途：
+  `02+room_id`，取应答源 IP）由 `resolve_pad` 实现，`tools resolve` 使用，也已内建进
+  `tools emit-door`：省略目标即按 `--room-id` 自动发现 Pad IP 后再呼叫。用途：
   在门口机与 Pad 相距很远时，验证我们分析的协议、以及 Agent/后端的正确性。
 - `door_station`：可交互的软件门口机。用保存的抓包帧/音频当门口摄像头和麦克风（呼叫
   期间按 `loop_fps` 循环），从 stdin 控制台 ring/hangup，claim/unlock/hangup 走可配置
@@ -47,10 +49,9 @@ Pad 未接听时成功；unlock 只在远程已接听时允许，默认 1 秒冷
   同一组 trait，对后端不可区分。
 - `agent_server`：把任意实现暴露成 HTTP 控制面的适配器，手写 HTTP/1.1，不引入
   HTTP 库。
-- `agent::LiveAgent`（`run_live_agent` + `bridge`，仅 Linux）：AF_PACKET 抓桥、
-  驱动通话状态机、广播门口视频/音频，并在收到后端命令时注入 claim/unlock/hangup、
-  对讲音频注入 Pad→门口机方向。它实现同一组 trait，由 `agent_server` 用与 replay
-  完全相同的方式对外服务。控制面只有 HTTP + SSE，没有别的后端传输。
+- 控制面只有 HTTP + SSE，没有别的后端传输。回放（`replay_agent`）、软件门口机
+  （`door_station`）、实体/旁路 Agent（`agent` 的 `pad`/`tap`）都实现同一组 trait，
+  由 `agent_server` 以完全相同的方式对外服务，对后端不可区分。
 
 standalone 部署时 Backend 直接调用 trait（函数调用和 channel，无序列化）；分离
 部署时经 HTTP。两种部署的失败模型一致：事件有 seq 并可续订，命令有 command_id，
@@ -126,7 +127,7 @@ reset 包的构造已单测，但 Pad 是否认中途注入的门口机 hangup �
 ## 当前实现边界
 
 已有：协议解析、pcap 等时回放（`ReplayAgent`）、真实 AF_PACKET 捕获 Agent
-（`LiveAgent`，Linux）、控制包注入、手动 nft 规则、first-answer 状态机、媒体抽象、
+（`agent` 的 `pad`/`tap` 模式）、控制包注入、手动 nft 规则、first-answer 状态机、媒体抽象、
 接口层、唯一的 HTTP 控制面（REST + SSE）、预录缓冲。回放与实机走同一组 trait 和
 同一个 `agent_server`，对后端不可区分。
 

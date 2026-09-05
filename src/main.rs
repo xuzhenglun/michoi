@@ -1,14 +1,14 @@
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use michoi::agent::replay_timeline;
+use michoi::replay_agent::replay_timeline;
 use sha2::{Digest, Sha256};
 
 #[derive(Parser)]
-#[command(version, about = "PENGUIN0 intercom Agent")]
+#[command(version, about = "michoi: PENGUIN0 intercom Agent")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -16,45 +16,47 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Print a machine-readable summary of the capture replay.
-    Analyze {
-        #[arg(default_value = "testdata/pad.cap")]
-        pcap: PathBuf,
-    },
-    /// Replay a pcap as an Agent over the HTTP control plane (REST + SSE),
-    /// described in docs/openapi.yaml.
-    FakeAgent {
-        #[arg(default_value = "testdata/pad.cap")]
-        pcap: PathBuf,
-        #[arg(long, default_value_t = 1.0)]
-        speed: f64,
-        /// Replay the call again after this many idle seconds instead of
-        /// staying idle after one pass.
-        #[arg(long, value_name = "SECONDS")]
-        repeat_after: Option<f64>,
-        /// Serve the HTTP control plane (REST + SSE) on this address.
-        #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:8080")]
-        http: SocketAddr,
-        /// Bearer token for the HTTP control plane.
+    /// The Agent: stands for the household's Pad on the wire and serves the
+    /// HTTP control plane (REST + SSE, browser Pad, see docs/openapi.yaml).
+    /// `--mode pad` is the Pad itself (cross-platform); `--mode tap` taps the
+    /// bridge next to a physical Pad (Linux router). Flags override the config.
+    Agent {
+        /// TOML configuration (config.example.toml); optional for pad mode.
+        config: Option<PathBuf>,
+        /// pad = this process is the Pad; tap = a physical Pad stays, tap the bridge.
+        #[arg(long, value_name = "pad|tap")]
+        mode: Option<michoi::config::AgentMode>,
+        /// The Pad's room station id: who I am (pad) or stand in for (tap).
+        #[arg(long, value_name = "ID")]
+        device_id: Option<String>,
+        /// LAN in CIDR form for discovery broadcasts, e.g. 192.168.124.0/24.
+        #[arg(long, value_name = "CIDR")]
+        subnet: Option<String>,
+        /// HTTP control plane address.
+        #[arg(long, value_name = "ADDR")]
+        http: Option<SocketAddr>,
+        /// Bearer token for the control plane (empty = no auth, development only).
         #[arg(long)]
         token: Option<String>,
-        /// Serve Swagger UI at /swagger on the HTTP control plane.
+        /// Serve Swagger UI at /swagger.
         #[arg(long)]
         swagger: bool,
         /// Do not serve the built-in browser Pad at / and /pad (headless).
         #[arg(long)]
         no_web_ui: bool,
-        /// Close event streams after this many seconds (default: random 300-600).
-        #[arg(long, value_name = "SECONDS")]
-        events_lifetime: Option<u64>,
+        /// pad mode: UDP control endpoint to bind (default 0.0.0.0:10000).
+        #[arg(long, value_name = "ADDR")]
+        listen: Option<SocketAddr>,
         /// Seconds of media kept for late joiners (0 = off).
-        #[arg(long, default_value_t = 5)]
-        history_secs: u64,
-        /// Byte cap of the media history in KiB.
-        #[arg(long, default_value_t = 2048)]
-        history_max_kib: u64,
+        #[arg(long, value_name = "SECONDS")]
+        history_secs: Option<u64>,
+        /// Seconds to wait for a UDP 10008 discovery reply at startup.
+        #[arg(long, default_value_t = 3.0)]
+        discover_timeout: f64,
     },
-    /// Run an interactive software door station you operate from the console.
+    /// The software door station you operate from the console: the saved
+    /// capture is its camera and microphone, backends and the browser Pad
+    /// connect to its HTTP control plane.
     Door {
         #[arg(default_value = "testdata/pad.cap")]
         pcap: PathBuf,
@@ -94,10 +96,56 @@ enum Commands {
         #[arg(long, value_name = "FILE")]
         audio_out: Option<PathBuf>,
     },
-    /// Emulate the door station from the protocol (not a replay): ring a
-    /// target Pad with a synthesized call built from a door/room identity, so
-    /// interacting with a real Pad validates the protocol. Camera frames come
-    /// from a directory; audio from a file or silence.
+    /// Debugging and validation tools.
+    Tools {
+        #[command(subcommand)]
+        tool: Tools,
+    },
+}
+
+#[derive(Subcommand)]
+enum Tools {
+    /// Print a machine-readable summary of the capture replay.
+    Analyze {
+        #[arg(default_value = "testdata/pad.cap")]
+        pcap: PathBuf,
+    },
+    /// Replay a pcap as an Agent over the HTTP control plane (a locked demo).
+    FakeAgent {
+        #[arg(default_value = "testdata/pad.cap")]
+        pcap: PathBuf,
+        #[arg(long, default_value_t = 1.0)]
+        speed: f64,
+        /// Replay the call again after this many idle seconds instead of
+        /// staying idle after one pass.
+        #[arg(long, value_name = "SECONDS")]
+        repeat_after: Option<f64>,
+        /// Serve the HTTP control plane (REST + SSE) on this address.
+        #[arg(long, value_name = "ADDR", default_value = "127.0.0.1:8080")]
+        http: SocketAddr,
+        /// Bearer token for the HTTP control plane.
+        #[arg(long)]
+        token: Option<String>,
+        /// Serve Swagger UI at /swagger on the HTTP control plane.
+        #[arg(long)]
+        swagger: bool,
+        /// Do not serve the built-in browser Pad at / and /pad (headless).
+        #[arg(long)]
+        no_web_ui: bool,
+        /// Close event streams after this many seconds (default: random 300-600).
+        #[arg(long, value_name = "SECONDS")]
+        events_lifetime: Option<u64>,
+        /// Seconds of media kept for late joiners (0 = off).
+        #[arg(long, default_value_t = 5)]
+        history_secs: u64,
+        /// Byte cap of the media history in KiB.
+        #[arg(long, default_value_t = 2048)]
+        history_max_kib: u64,
+    },
+    /// Emulate a door station from the protocol (not a replay): ring a target
+    /// Pad with a synthesized call, so interacting with a real Pad (or an
+    /// `agent --mode pad`) validates the protocol. Camera frames come from a
+    /// directory; audio from a file or silence.
     EmitDoor {
         /// Target Pad `ip` or `ip:port` (port defaults to the control port).
         /// Omit it to auto-discover the Pad from --room-id over UDP 10008.
@@ -147,11 +195,11 @@ enum Commands {
         #[arg(long, default_value_t = 3.0)]
         discover_timeout: f64,
     },
-    /// Resolve a Pad's IP from its room Station ID over the UDP 10008
-    /// discovery protocol (a private ARP): broadcast a query, read the reply.
+    /// Resolve a station's IP from its id over the UDP 10008 discovery
+    /// protocol (a private ARP): broadcast a query, read the reply.
     Resolve {
-        /// Room Station ID to look up, e.g. S00000000000.
-        room_id: String,
+        /// Station id to look up (room or door), e.g. S00000000000.
+        station_id: String,
         /// Where to broadcast the query (subnet broadcast or 255.255.255.255).
         #[arg(long, default_value = "255.255.255.255")]
         broadcast: std::net::Ipv4Addr,
@@ -159,46 +207,8 @@ enum Commands {
         #[arg(long, default_value_t = 3.0)]
         timeout: f64,
     },
-    /// Software Pad Agent: bind the control port, accept a door emulator
-    /// (`emit-door`) over UDP, and serve it to backends over the HTTP control
-    /// plane. Cross-platform (no AF_PACKET); access it from the browser Pad.
-    PadAgent {
-        /// UDP control port to bind (the Pad endpoint the door rings).
-        #[arg(long, default_value = "0.0.0.0:10000")]
-        listen: SocketAddr,
-        /// HTTP control plane (REST + SSE + browser Pad) address.
-        #[arg(long, default_value = "127.0.0.1:8080")]
-        http: SocketAddr,
-        /// This Pad's room Station ID.
-        #[arg(long, default_value = "S00000000000")]
-        room_id: String,
-        /// This Pad's IPv4 written into reply bodies (cosmetic on loopback).
-        #[arg(long, default_value = "127.0.0.1")]
-        room_ip: Ipv4Addr,
-        /// Bearer token for the control plane.
-        #[arg(long)]
-        token: Option<String>,
-        /// Serve Swagger UI at /swagger.
-        #[arg(long)]
-        swagger: bool,
-        /// Do not serve the built-in browser Pad at / and /pad (headless).
-        #[arg(long)]
-        no_web_ui: bool,
-        /// Also answer UDP 10008 discovery for --room-id.
-        #[arg(long)]
-        discover: bool,
-        /// Seconds of media kept for late joiners (0 = off).
-        #[arg(long, default_value_t = 5)]
-        history_secs: u64,
-        /// Byte cap of the media history in KiB.
-        #[arg(long, default_value_t = 2048)]
-        history_max_kib: u64,
-    },
     /// Print the bridge-family nftables rules for manual/automatic coexistence.
     NftRules { config: PathBuf },
-    /// Capture the real bridge and expose it to backends over the HTTP control
-    /// plane (REST + SSE, see docs/openapi.yaml). Linux only.
-    Agent { config: PathBuf },
     /// Validate and print a TOML configuration.
     CheckConfig { path: PathBuf },
 }
@@ -210,53 +220,70 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
     match Cli::parse().command {
-        Commands::Analyze { pcap } => {
-            let bytes = std::fs::read(&pcap)?;
-            let frames = replay_timeline(&pcap)?;
-            let first = frames.first().map(|f| f.offset_micros).unwrap_or(0);
-            let last = frames.last().map(|f| f.offset_micros).unwrap_or(0);
-            let manifest = serde_json::json!({
-                "capture": pcap,
-                "sha256": hex::encode(Sha256::digest(bytes)),
-                "agent_frames": frames.len(),
-                "first_offset_micros": first,
-                "last_offset_micros": last,
-            });
-            println!("{}", serde_json::to_string_pretty(&manifest)?);
-        }
-        Commands::FakeAgent {
-            pcap,
-            speed,
-            repeat_after,
+        Commands::Agent {
+            config,
+            mode,
+            device_id,
+            subnet,
             http,
             token,
             swagger,
             no_web_ui,
-            events_lifetime,
+            listen,
             history_secs,
-            history_max_kib,
+            discover_timeout,
         } => {
-            let repeat = repeat_after.map(Duration::from_secs_f64);
-            let agent = michoi::replay_agent::ReplayAgent::spawn(
-                &pcap,
-                speed,
-                Duration::from_secs(1),
-                repeat,
-                Duration::from_secs(history_secs),
-                (history_max_kib * 1024) as usize,
-            )?;
-            let mut config = michoi::agent_server::ServerConfig {
-                listen: http,
-                token: token.filter(|t| !t.is_empty()),
-                swagger,
-                web_ui: !no_web_ui,
-                ..Default::default()
+            let mut cfg = match config {
+                Some(path) => michoi::config::Config::load(path)?,
+                None => michoi::config::Config::default(),
             };
-            if let Some(seconds) = events_lifetime {
-                let lifetime = Duration::from_secs(seconds);
-                config.event_stream_lifetime = (lifetime, lifetime);
+            if let Some(mode) = mode {
+                cfg.intercom.mode = mode;
             }
-            michoi::agent_server::serve(config, agent).await?;
+            if let Some(id) = device_id {
+                cfg.intercom.device_id = id;
+            }
+            if let Some(subnet) = subnet {
+                cfg.intercom.subnet = Some(subnet);
+            }
+            if let Some(listen) = listen {
+                cfg.intercom.pad_listen = listen;
+            }
+            if let Some(http) = http {
+                cfg.agent.http_listen = http;
+            }
+            if let Some(token) = token {
+                cfg.agent.token = token;
+            }
+            if swagger {
+                cfg.agent.swagger = true;
+            }
+            if no_web_ui {
+                cfg.agent.web_ui = false;
+            }
+            if let Some(secs) = history_secs {
+                cfg.media.history_secs = secs;
+            }
+            cfg.validate()
+                .context("configuration (pass --device-id or a config file)")?;
+            let run = michoi::agent::Run {
+                server: michoi::agent_server::ServerConfig {
+                    listen: cfg.agent.http_listen,
+                    token: Some(cfg.agent.token.clone()).filter(|t| !t.is_empty()),
+                    swagger: cfg.agent.swagger,
+                    web_ui: cfg.agent.web_ui,
+                    ..Default::default()
+                },
+                intercom: cfg.intercom,
+                policy: michoi::agent::Policy {
+                    cooldown: Duration::from_millis(cfg.security.unlock_cooldown_ms),
+                    unlock_requires_answer: cfg.security.unlock_requires_answer,
+                },
+                history: Duration::from_secs(cfg.media.history_secs),
+                history_max_bytes: (cfg.media.history_max_kib * 1024) as usize,
+                discover_timeout: Duration::from_secs_f64(discover_timeout),
+            };
+            michoi::agent::run_agent(run).await?;
         }
         Commands::Door {
             pcap,
@@ -296,7 +323,62 @@ async fn main() -> Result<()> {
             };
             michoi::agent_server::serve(server, station).await?;
         }
-        Commands::EmitDoor {
+        Commands::Tools { tool } => run_tool(tool).await?,
+    }
+    Ok(())
+}
+
+async fn run_tool(tool: Tools) -> Result<()> {
+    match tool {
+        Tools::Analyze { pcap } => {
+            let bytes = std::fs::read(&pcap)?;
+            let frames = replay_timeline(&pcap)?;
+            let first = frames.first().map(|f| f.offset_micros).unwrap_or(0);
+            let last = frames.last().map(|f| f.offset_micros).unwrap_or(0);
+            let manifest = serde_json::json!({
+                "capture": pcap,
+                "sha256": hex::encode(Sha256::digest(bytes)),
+                "agent_frames": frames.len(),
+                "first_offset_micros": first,
+                "last_offset_micros": last,
+            });
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
+        }
+        Tools::FakeAgent {
+            pcap,
+            speed,
+            repeat_after,
+            http,
+            token,
+            swagger,
+            no_web_ui,
+            events_lifetime,
+            history_secs,
+            history_max_kib,
+        } => {
+            let repeat = repeat_after.map(Duration::from_secs_f64);
+            let agent = michoi::replay_agent::ReplayAgent::spawn(
+                &pcap,
+                speed,
+                Duration::from_secs(1),
+                repeat,
+                Duration::from_secs(history_secs),
+                (history_max_kib * 1024) as usize,
+            )?;
+            let mut config = michoi::agent_server::ServerConfig {
+                listen: http,
+                token: token.filter(|t| !t.is_empty()),
+                swagger,
+                web_ui: !no_web_ui,
+                ..Default::default()
+            };
+            if let Some(seconds) = events_lifetime {
+                let lifetime = Duration::from_secs(seconds);
+                config.event_stream_lifetime = (lifetime, lifetime);
+            }
+            michoi::agent_server::serve(config, agent).await?;
+        }
+        Tools::EmitDoor {
             target,
             door_id,
             door_ip,
@@ -368,84 +450,27 @@ async fn main() -> Result<()> {
                 obs.capability_reply, obs.answered, obs.unlocks, obs.hangups, obs.audio_packets, obs.audio_bytes
             );
         }
-        Commands::Resolve {
-            room_id,
+        Tools::Resolve {
+            station_id,
             broadcast,
             timeout,
         } => {
             let ip = michoi::emitter::resolve_pad(
-                &room_id,
+                &station_id,
                 broadcast,
                 Duration::from_secs_f64(timeout),
             )
             .await?;
-            println!("{room_id} -> {ip}");
+            println!("{station_id} -> {ip}");
         }
-        Commands::CheckConfig { path } => {
-            let config = michoi::config::Config::load(path)?;
-            println!("{config:#?}");
-        }
-        Commands::PadAgent {
-            listen,
-            http,
-            room_id,
-            room_ip,
-            token,
-            swagger,
-            no_web_ui,
-            discover,
-            history_secs,
-            history_max_kib,
-        } => {
-            let server = michoi::agent_server::ServerConfig {
-                listen: http,
-                token: token.filter(|t| !t.is_empty()),
-                swagger,
-                web_ui: !no_web_ui,
-                ..Default::default()
-            };
-            michoi::socket_agent::run_socket_agent(
-                server,
-                listen,
-                michoi::protocol::Station::new(room_id, room_ip),
-                Duration::from_secs(history_secs),
-                (history_max_kib * 1024) as usize,
-                discover,
-            )
-            .await?;
-        }
-        Commands::NftRules { config } => {
+        Tools::NftRules { config } => {
             let config = michoi::config::Config::load(config)?;
             print!("{}", michoi::firewall::nft_rules(&config)?);
         }
-        Commands::Agent { config } => run_agent(config).await?,
+        Tools::CheckConfig { path } => {
+            let config = michoi::config::Config::load(path)?;
+            println!("{config:#?}");
+        }
     }
     Ok(())
-}
-
-async fn run_agent(path: PathBuf) -> Result<()> {
-    let config = michoi::config::Config::load(path)?;
-    #[cfg(all(target_os = "linux", feature = "linux-packet"))]
-    {
-        use michoi::agent::{run_live_agent, LivePolicy};
-        let policy = LivePolicy {
-            cooldown: Duration::from_millis(config.security.unlock_cooldown_ms),
-            unlock_requires_answer: config.security.unlock_requires_answer,
-        };
-        let server = michoi::agent_server::ServerConfig {
-            listen: config.agent.http_listen,
-            token: Some(config.agent.token.clone()).filter(|t| !t.is_empty()),
-            swagger: config.agent.swagger,
-            web_ui: config.agent.web_ui,
-            ..Default::default()
-        };
-        let history = Duration::from_secs(config.media.history_secs);
-        let history_max_bytes = (config.media.history_max_kib * 1024) as usize;
-        run_live_agent(server, config.intercom, policy, history, history_max_bytes).await
-    }
-    #[cfg(not(all(target_os = "linux", feature = "linux-packet")))]
-    {
-        let _ = config;
-        anyhow::bail!("real Agent requires Linux and --features linux-packet")
-    }
 }

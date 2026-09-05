@@ -1,15 +1,29 @@
 [intercom]
+# pad = this process IS the Pad (UDP endpoint, cross-platform).
+# tap = a physical Pad stays; tap the bridge and arbitrate (Linux router).
+mode = "tap"
+# The one identity: the Pad's room station id (who I am / whom I stand in for).
+device_id = "S00000000000"
+# LAN for the UDP 10008 discovery broadcast (optional; 255.255.255.255 if unset).
+subnet = "192.168.124.0/24"
+
+# tap mode: the bridge to capture and its member ports (for nft silencing).
+# Determine the ports by swapping cables or observing switch counters.
 bridge_interface = "br-lan"
-# Determine these by swapping cables or observing switch counters.
 door_interface = "eth0.2"
 pad_interface = "eth0.1"
-door_id = "M00000000000"
-room_id = "S00000000000"
-door_ip = "192.168.124.2"
-room_ip = "192.168.124.61"
-# Obtain both with: tcpdump -eni br-lan 'udp port 10000'
-door_mac = "00:00:00:00:00:02"
-pad_mac = "00:00:00:00:00:3d"
+
+# pad mode: UDP control endpoint to bind.
+pad_listen = "0.0.0.0:10000"
+
+# Everything below is optional. Unset = discovered (UDP 10008) or learned from
+# the door's discovery exchange / the first call, then pinned (trust on first
+# use). Set them to pin up front instead.
+# door_id = "M00000000000"
+# door_ip = "192.168.124.2"
+# room_ip = "192.168.124.61"
+# door_mac = "00:00:00:00:00:02"
+# pad_mac = "00:00:00:00:00:3d"
 control_port = 10000
 discovery_port = 10008
 

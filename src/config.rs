@@ -39,8 +39,13 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
-        anyhow::ensure!(!self.intercom.room_id.is_empty(), "room_id is empty");
-        anyhow::ensure!(!self.intercom.door_id.is_empty(), "door_id is empty");
+        anyhow::ensure!(
+            !self.intercom.device_id.is_empty(),
+            "intercom.device_id (the Pad's room station id) is required"
+        );
+        if let Some(subnet) = self.intercom.subnet.as_deref().filter(|s| !s.is_empty()) {
+            subnet_broadcast(subnet)?;
+        }
         anyhow::ensure!(
             self.security.unlock_cooldown_ms >= 250,
             "unlock cooldown must be at least 250 ms"
@@ -50,16 +55,61 @@ impl Config {
     }
 }
 
+/// How the Agent stands on the wire. See `agent`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentMode {
+    /// 实体: this process is the Pad (UDP endpoint; cross-platform).
+    Pad,
+    /// 旁路: a physical Pad stays; tap the bridge and arbitrate (Linux).
+    Tap,
+}
+
+impl AgentMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pad => "pad",
+            Self::Tap => "tap",
+        }
+    }
+}
+
+impl std::str::FromStr for AgentMode {
+    type Err = anyhow::Error;
+    fn from_str(text: &str) -> Result<Self> {
+        match text {
+            "pad" => Ok(Self::Pad),
+            "tap" => Ok(Self::Tap),
+            other => anyhow::bail!("unknown agent mode {other:?}; use \"pad\" or \"tap\""),
+        }
+    }
+}
+
+/// The one identity plus the environment. Only `device_id` (and, for tap
+/// mode, the interfaces) must be set: the Pad's IP, the door station and both
+/// MACs are discovered or learned from the first call and then pinned. The
+/// optional fields pin them up front instead.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct IntercomConfig {
+    pub mode: AgentMode,
+    /// The Pad's room station id: who this process is (pad) or stands in
+    /// for (tap).
+    #[serde(alias = "room_id")]
+    pub device_id: String,
+    /// LAN in CIDR form, e.g. "192.168.124.0/24", for the UDP 10008 discovery
+    /// broadcast. Unset = 255.255.255.255.
+    pub subnet: Option<String>,
+    /// pad mode: UDP control endpoint to bind.
+    pub pad_listen: SocketAddr,
+    /// tap mode: the bridge to capture and its two member ports (for nft).
     pub bridge_interface: String,
     pub door_interface: String,
     pub pad_interface: String,
-    pub door_id: String,
-    pub room_id: String,
-    pub door_ip: Ipv4Addr,
-    pub room_ip: Ipv4Addr,
+    /// Optional pins; learned when unset.
+    pub door_id: Option<String>,
+    pub door_ip: Option<Ipv4Addr>,
+    pub room_ip: Option<Ipv4Addr>,
     pub door_mac: Option<String>,
     pub pad_mac: Option<String>,
     pub control_port: u16,
@@ -69,19 +119,45 @@ pub struct IntercomConfig {
 impl Default for IntercomConfig {
     fn default() -> Self {
         Self {
+            mode: AgentMode::Tap,
+            device_id: String::new(),
+            subnet: None,
+            pad_listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 10_000),
             bridge_interface: "br-lan".into(),
             door_interface: "CONFIGURE_ME".into(),
             pad_interface: "CONFIGURE_ME".into(),
-            door_id: "M00000000000".into(),
-            room_id: "S00000000000".into(),
-            door_ip: Ipv4Addr::new(192, 168, 124, 2),
-            room_ip: Ipv4Addr::new(192, 168, 124, 61),
+            door_id: None,
+            door_ip: None,
+            room_ip: None,
             door_mac: None,
             pad_mac: None,
             control_port: 10_000,
             discovery_port: 10_008,
         }
     }
+}
+
+impl IntercomConfig {
+    /// Where discovery queries are broadcast: the subnet's directed broadcast,
+    /// or the limited broadcast when no subnet is configured.
+    pub fn discovery_broadcast(&self) -> Result<Ipv4Addr> {
+        match self.subnet.as_deref().filter(|s| !s.is_empty()) {
+            Some(cidr) => subnet_broadcast(cidr),
+            None => Ok(Ipv4Addr::BROADCAST),
+        }
+    }
+}
+
+/// Directed broadcast address of an IPv4 CIDR such as "192.168.124.0/24".
+pub fn subnet_broadcast(cidr: &str) -> Result<Ipv4Addr> {
+    let (ip, prefix) = cidr
+        .split_once('/')
+        .with_context(|| format!("subnet {cidr:?} must look like 192.168.1.0/24"))?;
+    let ip: Ipv4Addr = ip.parse().with_context(|| format!("bad subnet address in {cidr:?}"))?;
+    let prefix: u32 = prefix.parse().with_context(|| format!("bad prefix length in {cidr:?}"))?;
+    anyhow::ensure!(prefix <= 32, "prefix length in {cidr:?} exceeds 32");
+    let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+    Ok(Ipv4Addr::from(u32::from(ip) | !mask))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,5 +273,31 @@ impl Default for SecurityConfig {
             virtual_unlock_ms: 1_500,
             max_call_seconds: 300,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subnet_broadcast_is_derived_from_cidr() {
+        assert_eq!(
+            subnet_broadcast("192.168.124.0/24").unwrap(),
+            Ipv4Addr::new(192, 168, 124, 255)
+        );
+        assert_eq!(subnet_broadcast("10.1.2.3/16").unwrap(), Ipv4Addr::new(10, 1, 255, 255));
+        assert_eq!(subnet_broadcast("10.0.0.0/30").unwrap(), Ipv4Addr::new(10, 0, 0, 3));
+        assert!(subnet_broadcast("192.168.1.0").is_err());
+        assert!(subnet_broadcast("192.168.1.0/33").is_err());
+    }
+
+    #[test]
+    fn old_room_id_key_still_parses_as_device_id() {
+        let config: Config =
+            toml::from_str("[intercom]\nroom_id = \"S00000000000\"\n").unwrap();
+        assert_eq!(config.intercom.device_id, "S00000000000");
+        assert_eq!(config.intercom.mode, AgentMode::Tap);
+        config.validate().unwrap();
     }
 }

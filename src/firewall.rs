@@ -1,6 +1,8 @@
-use anyhow::Result;
+use std::net::Ipv4Addr;
 
-use crate::config::{CoexistenceMode, Config, IntercomConfig};
+use anyhow::{Context, Result};
+
+use crate::config::{CoexistenceMode, Config};
 
 /// nftables bridge table the Agent owns. Removing it restores the physical
 /// Pad path (fail-open), so the Agent flushes it on shutdown.
@@ -16,7 +18,10 @@ pub const TABLE: &str = "michoi";
 pub fn nft_rules(config: &Config) -> Result<String> {
     let pad = &config.intercom.pad_interface;
     anyhow::ensure!(pad != "CONFIGURE_ME", "pad_interface is not configured");
-    let room = config.intercom.room_ip;
+    let room = config
+        .intercom
+        .room_ip
+        .context("intercom.room_ip must be set to print static rules (the agent learns it at runtime)")?;
     let control = config.intercom.control_port;
     let discovery = config.intercom.discovery_port;
     let body = match config.coexistence.mode {
@@ -54,14 +59,15 @@ pub fn nft_rules(config: &Config) -> Result<String> {
 ///
 /// Discovery (`discovery_port`) is intentionally left alone so the Pad can
 /// still be found on the LAN while a call is owned remotely.
-pub fn pad_silence_rules(intercom: &IntercomConfig) -> Result<String> {
-    let pad = &intercom.pad_interface;
-    let door = &intercom.door_interface;
+pub fn pad_silence_rules(
+    pad: &str,
+    door: &str,
+    door_ip: Ipv4Addr,
+    room: Ipv4Addr,
+    control: u16,
+) -> Result<String> {
     anyhow::ensure!(pad != "CONFIGURE_ME", "pad_interface is not configured");
     anyhow::ensure!(door != "CONFIGURE_ME", "door_interface is not configured");
-    let door_ip = intercom.door_ip;
-    let room = intercom.room_ip;
-    let control = intercom.control_port;
     Ok(format!(
         "table bridge {TABLE} {{\n  chain forward {{\n    type filter hook forward priority -200; policy accept;\n    \
 iifname \"{door}\" ip saddr {door_ip} udp dport {control} counter drop\n    \
@@ -82,7 +88,19 @@ mod tests {
         let mut config = Config::default();
         config.intercom.pad_interface = "eth0.1".into();
         config.intercom.door_interface = "eth0.2".into();
+        config.intercom.room_ip = Some(Ipv4Addr::new(192, 168, 124, 61));
         config
+    }
+
+    fn silence() -> String {
+        pad_silence_rules(
+            "eth0.1",
+            "eth0.2",
+            Ipv4Addr::new(192, 168, 124, 2),
+            Ipv4Addr::new(192, 168, 124, 61),
+            10_000,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -95,7 +113,7 @@ mod tests {
 
     #[test]
     fn pad_silence_drops_both_directions_of_control() {
-        let rules = pad_silence_rules(&configured().intercom).unwrap();
+        let rules = silence();
         // door -> Pad (silences the ring and picture)
         assert!(rules
             .contains("iifname \"eth0.2\" ip saddr 192.168.124.2 udp dport 10000 counter drop"));
@@ -108,9 +126,7 @@ mod tests {
 
     #[test]
     fn silence_and_static_share_one_table() {
-        assert!(pad_silence_rules(&configured().intercom)
-            .unwrap()
-            .contains("table bridge michoi"));
+        assert!(silence().contains("table bridge michoi"));
         assert_eq!(flush_table_command(), "delete table bridge michoi");
     }
 }

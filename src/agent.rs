@@ -1,214 +1,140 @@
-//! Agent building blocks: the pcap replay timeline and the live AF_PACKET
-//! capture Agent.
+//! The Agent: one object that stands for the household's Pad on the wire and
+//! serves the HTTP control plane, in one of two modes.
 //!
-//! Both feed the same HTTP control plane (`agent_server`) through the
-//! `AgentControl` / `AgentMedia` traits: `ReplayAgent` (in `replay_agent`)
-//! replays `pad.cap`, and `LiveAgent` (here, Linux only) captures the real
-//! bridge and injects control/audio. HTTP + SSE is the only backend transport.
+//! - `pad` (实体): this process *is* the Pad. It binds the control port,
+//!   answers the door's discovery and handshake itself, and sends
+//!   answer/unlock/talk as the Pad. Cross-platform.
+//! - `tap` (旁路): a physical Pad stays in place. The Agent taps the bridge
+//!   (AF_PACKET) to follow the door<->Pad call and, when a remote backend takes
+//!   over, injects Pad-originated packets to the door, silences the physical
+//!   Pad and tells it the call ended. Linux only.
+//!
+//! Everything above the wire is shared; the mode lives in a [`Wire`] impl
+//! (`wire_udp`, `wire_tap`). Identity is one device id, the Pad's room station
+//! id. The Pad's IP, the door's identity and both MACs are discovered
+//! (UDP 10008) or learned from the first call and then pinned: later frames
+//! that claim the same station from another IP/MAC are dropped with a warning
+//! (trust on first use).
 
 use std::net::Ipv4Addr;
-use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-
-use crate::pcap::read_udp;
-use crate::protocol::{
-    split_coalesced, Endpoints, JpegReassembler, Message, FAMILY_SESSION, MEDIA_AUDIO, OP_ANSWER,
-    OP_HANGUP, OP_MEDIA, OP_REQUEST, OP_UNLOCK,
-};
-use crate::transport::{AgentEvent, FrameKind, WireFrame};
-
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-use std::sync::atomic::{AtomicU32, Ordering};
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-use std::sync::{Arc, Mutex};
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-use std::time::{Duration, Instant};
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
 use futures_util::{future::BoxFuture, FutureExt};
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
 use tokio::sync::broadcast;
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
+
 use crate::agent_api::{
     now_ms, AgentControl, AgentMedia, AudioChunk, AudioInfo, CallAction, CallError, CallState,
     CommandCache, CommandResult, Event, EventKind, EventLog, MediaHistory, MediaInfo, MediaRing,
     Owner, VideoFrame, VideoInfo,
 };
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
 use crate::agent_server::ServerConfig;
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-use crate::protocol::{audio_packet, session_control};
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
+use crate::config::{AgentMode, IntercomConfig};
+use crate::emitter::resolve_pad;
+use crate::ethernet::MacAddress;
+use crate::protocol::{
+    audio_packet, bootstrap_reply, session_control, session_reply, Endpoints, JpegReassembler,
+    Message, Station, FAMILY_BOOTSTRAP, FAMILY_SESSION, MEDIA_AUDIO, OP_ANSWER, OP_HANGUP,
+    OP_KEEPALIVE, OP_MEDIA, OP_REQUEST, OP_UNLOCK,
+};
 use crate::state::{CallMachine, CallPhase};
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-use crate::bridge::PacketSocket;
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-use crate::config::IntercomConfig;
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-use crate::ethernet::{build_udp_ipv4, EthernetUdp, MacAddress};
 
-#[derive(Debug, Clone)]
-pub struct TimedFrame {
-    pub offset_micros: u64,
-    pub frame: WireFrame,
+/// Which station a wire datagram came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Door,
+    Pad,
 }
 
-pub fn replay_timeline(path: impl AsRef<Path>) -> Result<Vec<TimedFrame>> {
-    let records = read_udp(path)?;
-    let first_session = records
-        .iter()
-        .flat_map(|record| {
-            split_coalesced(&record.payload)
-                .into_iter()
-                .map(move |raw| (record, raw))
-        })
-        .find_map(|(record, raw)| {
-            let msg = Message::parse(raw).ok()?;
-            (msg.family == FAMILY_SESSION && msg.opcode == OP_REQUEST)
-                .then_some(record.timestamp_micros)
-        })
-        .context("pcap has no PENGUIN0 session request")?;
-    let mut jpeg = JpegReassembler::default();
-    let mut out = Vec::new();
-    let mut sequence = 0_u32;
-    let mut session_id = 0_u64;
-    let mut started = false;
-    let mut ended = false;
+/// The two stations of this household as currently known. Fields start from
+/// the configuration and are filled by discovery / learning, then pinned.
+#[derive(Clone, Debug)]
+pub struct Peers {
+    /// The Pad we are or stand in for; `ip` may be unspecified until learned.
+    pub room: Station,
+    /// The door station, once configured, discovered or seen ringing.
+    pub door: Option<Station>,
+    pub door_mac: Option<MacAddress>,
+    pub pad_mac: Option<MacAddress>,
+    pub control_port: u16,
+}
 
-    for record in &records {
-        if record.timestamp_micros < first_session {
-            continue;
-        }
-        for raw in split_coalesced(&record.payload) {
-            let Ok(msg) = Message::parse(raw) else {
-                continue;
-            };
-            if msg.family != FAMILY_SESSION {
-                continue;
-            }
-            let offset = record.timestamp_micros - first_session;
-            if msg.opcode == OP_REQUEST && !started {
-                started = true;
-                session_id = first_session.max(1);
-                let endpoints = msg.endpoints().unwrap_or_else(Endpoints::captured);
-                let event = AgentEvent::CallStarted {
-                    door_id: endpoints.door.id,
-                    room_id: endpoints.room.id,
-                };
-                out.push(TimedFrame {
-                    offset_micros: offset,
-                    frame: WireFrame::cbor(FrameKind::Event, session_id, sequence, offset, &event)?,
-                });
-                sequence += 1;
-            }
-            if msg.opcode == OP_ANSWER || msg.opcode == OP_UNLOCK {
-                let event = AgentEvent::PadActionObserved { opcode: msg.opcode };
-                out.push(TimedFrame {
-                    offset_micros: offset,
-                    frame: WireFrame::cbor(FrameKind::Event, session_id, sequence, offset, &event)?,
-                });
-                sequence += 1;
-            }
-            if msg.opcode == OP_HANGUP && !ended {
-                ended = true;
-                let event = AgentEvent::CallEnded {
-                    reason: "captured_hangup".into(),
-                };
-                out.push(TimedFrame {
-                    offset_micros: offset,
-                    frame: WireFrame::cbor(FrameKind::Event, session_id, sequence, offset, &event)?,
-                });
-                sequence += 1;
-            }
-            if msg.opcode != OP_MEDIA || record.source_ip != Ipv4Addr::new(192, 168, 124, 2) {
-                continue;
-            }
-            let Some(media) = msg.media() else { continue };
-            if media.media_type == MEDIA_AUDIO {
-                out.push(TimedFrame {
-                    offset_micros: offset,
-                    frame: WireFrame {
-                        kind: FrameKind::DoorPcm,
-                        flags: 0,
-                        session_id,
-                        sequence,
-                        timestamp_micros: offset,
-                        payload: media.data.to_vec(),
-                    },
-                });
-                sequence += 1;
-            } else if let Some(frame) = jpeg.push(&media) {
-                out.push(TimedFrame {
-                    offset_micros: offset,
-                    frame: WireFrame {
-                        kind: FrameKind::Jpeg,
-                        flags: 0,
-                        session_id,
-                        sequence,
-                        timestamp_micros: offset,
-                        payload: frame,
-                    },
-                });
-                sequence += 1;
-            }
-        }
+impl Peers {
+    /// The endpoint block for Pad-originated packets, once the door is known.
+    pub fn endpoints(&self) -> Option<Endpoints> {
+        self.door.clone().map(|door| Endpoints {
+            door,
+            room: self.room.clone(),
+        })
     }
-    Ok(out)
 }
 
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-pub struct LivePolicy {
+/// What differs between the modes: how bytes reach the door and what happens
+/// to the physical Pad. Everything else in the Agent is shared.
+pub trait Wire: Send + Sync + 'static {
+    fn name(&self) -> &'static str;
+    /// Pad-side handshake replies (bootstrap, capability). `pad` sends them;
+    /// `tap` does nothing because the physical Pad answers.
+    fn handshake_reply(&self, payload: &[u8], peers: &Peers) -> Result<()>;
+    /// A Pad-originated packet to the door: claim, unlock, hangup, keepalive,
+    /// talk audio.
+    fn send_as_pad(&self, payload: &[u8], peers: &Peers) -> Result<()>;
+    /// A remote backend won the ringing call.
+    fn on_remote_claim(&self, peers: &Peers);
+    /// The call ended, from either side.
+    fn on_call_end(&self, peers: &Peers);
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Policy {
     pub cooldown: Duration,
     pub unlock_requires_answer: bool,
 }
 
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-const LIVE_AGENT_ID: &str = "openwrt-live";
-
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-struct LiveCall {
+struct Call {
     machine: CallMachine,
-    door_id: Option<String>,
-    room_id: Option<String>,
     since_ms: Option<u64>,
+    next_session: u64,
 }
 
-/// The live capture Agent: it observes the bridge, tracks call state, fans out
-/// door media, and injects claim/unlock/hangup/talk on the wire. It implements
-/// the same traits as `ReplayAgent`, so `agent_server` serves it identically.
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-pub struct LiveAgent {
-    call: Mutex<LiveCall>,
+pub struct Agent {
+    mode: AgentMode,
+    wire: Arc<dyn Wire>,
+    peers: Mutex<Peers>,
+    call: Mutex<Call>,
     events: EventLog,
     commands: CommandCache,
     video: broadcast::Sender<VideoFrame>,
     audio: broadcast::Sender<AudioChunk>,
     latest: Mutex<Option<VideoFrame>>,
     history: MediaRing,
+    jpeg: Mutex<JpegReassembler>,
     started: Instant,
-    socket: Arc<PacketSocket>,
-    config: IntercomConfig,
-    inject_seq: AtomicU32,
+    audio_seq: AtomicU32,
+    mismatches: AtomicU32,
 }
 
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-impl LiveAgent {
-    fn new(
-        socket: Arc<PacketSocket>,
-        config: IntercomConfig,
-        policy: LivePolicy,
+impl Agent {
+    pub fn new(
+        mode: AgentMode,
+        wire: Arc<dyn Wire>,
+        peers: Peers,
+        policy: Policy,
         history: Duration,
         history_max_bytes: usize,
-        started: Instant,
     ) -> Arc<Self> {
         let (video, _) = broadcast::channel(32);
         let (audio, _) = broadcast::channel(128);
         Arc::new(Self {
-            call: Mutex::new(LiveCall {
+            mode,
+            wire,
+            peers: Mutex::new(peers),
+            call: Mutex::new(Call {
                 machine: CallMachine::with_policy(policy.cooldown, policy.unlock_requires_answer),
-                door_id: None,
-                room_id: None,
                 since_ms: None,
+                next_session: 1,
             }),
             events: EventLog::new(256, 64),
             commands: CommandCache::new(256),
@@ -216,36 +142,248 @@ impl LiveAgent {
             audio,
             latest: Mutex::new(None),
             history: MediaRing::new(history, history_max_bytes),
-            started,
-            socket,
-            config,
-            inject_seq: AtomicU32::new(1),
+            jpeg: Mutex::new(JpegReassembler::default()),
+            started: Instant::now(),
+            audio_seq: AtomicU32::new(0),
+            mismatches: AtomicU32::new(0),
         })
     }
 
-    fn next_seq(&self) -> u32 {
-        self.inject_seq.fetch_add(1, Ordering::Relaxed)
+    pub fn mode(&self) -> AgentMode {
+        self.mode
+    }
+
+    /// The Pad's room station id: the one configured identity.
+    pub fn device_id(&self) -> String {
+        self.peers.lock().unwrap().room.id.clone()
+    }
+
+    pub fn peers(&self) -> Peers {
+        self.peers.lock().unwrap().clone()
+    }
+
+    fn agent_id(&self) -> String {
+        format!("michoi-{}", self.mode.as_str())
     }
 
     fn session_string(&self) -> String {
         self.call.lock().unwrap().machine.state().session_id.to_string()
     }
 
-    // --- capture side: called by capture_loop as wire events arrive ---
-
-    fn on_call_started(&self, session_id: u64, door_id: String, room_id: String) {
-        {
-            let mut call = self.call.lock().unwrap();
-            call.machine.start_call(session_id);
-            call.door_id = Some(door_id.clone());
-            call.room_id = Some(room_id.clone());
-            call.since_ms = Some(now_ms());
+    fn warn_mismatch(&self, what: &str, detail: String) {
+        let n = self.mismatches.fetch_add(1, Ordering::Relaxed);
+        if n < 5 || n % 100 == 0 {
+            tracing::warn!(count = n + 1, "{what} does not match the pinned identity, ignoring: {detail}");
         }
-        self.events.push(EventKind::CallStarted {
-            session_id: session_id.to_string(),
-            door_id,
-            room_id,
-        });
+    }
+
+    // ---------------------------------------------------------------- identity
+
+    /// The Pad's own IP, once a wire learns it (pad mode: our address toward
+    /// the door; tap mode: from the endpoint block).
+    pub fn set_room_ip_if_unset(&self, ip: Ipv4Addr) {
+        let mut peers = self.peers.lock().unwrap();
+        if peers.room.ip.is_unspecified() && !ip.is_unspecified() {
+            peers.room.ip = ip;
+            tracing::info!(%ip, id = %peers.room.id, "learned the Pad's IP");
+        }
+    }
+
+    /// A station's IP seen on the wire outside a session (the UDP 10008
+    /// discovery exchange in tap mode): pin it, or reject a change.
+    pub fn learn_address(&self, side: Side, ip: Ipv4Addr) -> bool {
+        if ip.is_unspecified() {
+            return false;
+        }
+        let mut peers = self.peers.lock().unwrap();
+        match side {
+            Side::Pad => {
+                if peers.room.ip.is_unspecified() {
+                    peers.room.ip = ip;
+                    tracing::info!(%ip, "learned the Pad's IP from discovery");
+                    true
+                } else if peers.room.ip == ip {
+                    true
+                } else {
+                    let detail = format!("Pad IP {ip} (pinned {})", peers.room.ip);
+                    drop(peers);
+                    self.warn_mismatch("Pad IP", detail);
+                    false
+                }
+            }
+            Side::Door => match peers.door.as_mut() {
+                None => {
+                    peers.door = Some(Station::new(String::new(), ip));
+                    tracing::info!(%ip, "learned the door's IP from discovery (id comes with the ring)");
+                    true
+                }
+                Some(door) if door.ip.is_unspecified() => {
+                    door.ip = ip;
+                    tracing::info!(%ip, id = %door.id, "learned the door's IP from discovery");
+                    true
+                }
+                Some(door) if door.ip == ip => true,
+                Some(door) => {
+                    let detail = format!("door IP {ip} (pinned {})", door.ip);
+                    drop(peers);
+                    self.warn_mismatch("door IP", detail);
+                    false
+                }
+            },
+        }
+    }
+
+    /// Pin the MAC of a station on first sight; afterwards a different MAC for
+    /// the same station is rejected. Returns whether the frame is accepted.
+    pub fn pin_mac(&self, side: Side, mac: MacAddress) -> bool {
+        let mut peers = self.peers.lock().unwrap();
+        let slot = match side {
+            Side::Door => &mut peers.door_mac,
+            Side::Pad => &mut peers.pad_mac,
+        };
+        match slot {
+            None => {
+                *slot = Some(mac);
+                tracing::info!(?side, ?mac, "learned and pinned MAC");
+                true
+            }
+            Some(pinned) if *pinned == mac => true,
+            Some(pinned) => {
+                let detail = format!("{side:?} MAC {mac:?} (pinned {pinned:?})");
+                drop(peers);
+                self.warn_mismatch("MAC", detail);
+                false
+            }
+        }
+    }
+
+    /// Check a session endpoint block against the pinned household and learn
+    /// what is still unknown. Returns the peers snapshot when accepted.
+    fn accept_endpoints(&self, endpoints: &Endpoints) -> Option<Peers> {
+        let mut peers = self.peers.lock().unwrap();
+        if endpoints.room.id != peers.room.id {
+            return None; // another household on the same bridge
+        }
+        if peers.room.ip.is_unspecified() {
+            if !endpoints.room.ip.is_unspecified() {
+                peers.room.ip = endpoints.room.ip;
+                tracing::info!(ip = %endpoints.room.ip, "learned the Pad's IP from the call");
+            }
+        } else if peers.room.ip != endpoints.room.ip {
+            let detail = format!("Pad IP {} (pinned {})", endpoints.room.ip, peers.room.ip);
+            drop(peers);
+            self.warn_mismatch("Pad IP", detail);
+            return None;
+        }
+        match peers.door.as_mut() {
+            None => {
+                tracing::info!(id = %endpoints.door.id, ip = %endpoints.door.ip, "learned and pinned the door station");
+                peers.door = Some(endpoints.door.clone());
+            }
+            // Address pinned from the observed discovery exchange; the id
+            // arrives with the first ring.
+            Some(door) if door.id.is_empty() && door.ip == endpoints.door.ip => {
+                door.id = endpoints.door.id.clone();
+                tracing::info!(id = %door.id, ip = %door.ip, "learned the door's station id from the call");
+            }
+            Some(door) if door.id == endpoints.door.id && door.ip.is_unspecified() => {
+                door.ip = endpoints.door.ip;
+                tracing::info!(id = %door.id, ip = %door.ip, "learned the door's IP from the call");
+            }
+            Some(door) if door.id == endpoints.door.id && door.ip == endpoints.door.ip => {}
+            Some(door) => {
+                let detail = format!(
+                    "door {}@{} (pinned {}@{})",
+                    endpoints.door.id, endpoints.door.ip, door.id, door.ip
+                );
+                drop(peers);
+                self.warn_mismatch("door station", detail);
+                return None;
+            }
+        }
+        Some(peers.clone())
+    }
+
+    // ---------------------------------------------------------------- wire in
+
+    /// One PENGUIN0 message from the wire, already attributed to a side.
+    pub fn on_wire(&self, side: Side, raw: &[u8]) {
+        let Ok(message) = Message::parse(raw) else {
+            return;
+        };
+        if message.family == FAMILY_BOOTSTRAP && message.opcode == OP_REQUEST {
+            if side == Side::Door {
+                let peers = self.peers();
+                if let Ok(reply) = bootstrap_reply(&peers.room) {
+                    if let Err(error) = self.wire.handshake_reply(&reply, &peers) {
+                        tracing::warn!(%error, "bootstrap reply failed");
+                    }
+                }
+            }
+            return;
+        }
+        if message.family != FAMILY_SESSION {
+            return;
+        }
+        let Some(endpoints) = message.endpoints() else {
+            return;
+        };
+        let Some(peers) = self.accept_endpoints(&endpoints) else {
+            return;
+        };
+        match message.opcode {
+            OP_REQUEST if side == Side::Door => {
+                if let Ok(reply) = session_reply(&endpoints) {
+                    if let Err(error) = self.wire.handshake_reply(&reply, &peers) {
+                        tracing::warn!(%error, "capability reply failed");
+                    }
+                }
+                self.on_call_started(&endpoints);
+            }
+            OP_ANSWER if side == Side::Pad => self.on_pad_answer(),
+            OP_UNLOCK if side == Side::Pad => self.on_pad_unlock(),
+            OP_HANGUP => self.on_wire_hangup(&peers),
+            OP_MEDIA if side == Side::Door => {
+                let Some(media) = message.media() else {
+                    return;
+                };
+                let pts_us = self.started.elapsed().as_micros() as u64;
+                if media.media_type == MEDIA_AUDIO {
+                    self.push_audio(AudioChunk {
+                        pts_us,
+                        pcm: Arc::from(media.data),
+                    });
+                } else if let Some(frame) = self.jpeg.lock().unwrap().push(&media) {
+                    self.push_video(VideoFrame {
+                        pts_us,
+                        jpeg: Arc::from(frame.as_slice()),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn on_call_started(&self, endpoints: &Endpoints) {
+        let started = {
+            let mut call = self.call.lock().unwrap();
+            if call.machine.state().phase != CallPhase::Idle {
+                None
+            } else {
+                let id = call.next_session;
+                call.next_session += 1;
+                call.machine.start_call(id);
+                call.since_ms = Some(now_ms());
+                Some(id)
+            }
+        };
+        if let Some(id) = started {
+            self.events.push(EventKind::CallStarted {
+                session_id: id.to_string(),
+                door_id: endpoints.door.id.clone(),
+                room_id: endpoints.room.id.clone(),
+            });
+        }
     }
 
     fn on_pad_answer(&self) {
@@ -279,7 +417,7 @@ impl LiveAgent {
         }
     }
 
-    fn on_wire_hangup(&self) {
+    fn on_wire_hangup(&self, peers: &Peers) {
         let (active, id) = {
             let mut call = self.call.lock().unwrap();
             let id = call.machine.state().session_id;
@@ -289,8 +427,7 @@ impl LiveAgent {
             (active, id)
         };
         if active {
-            // A real hangup ends any takeover: restore the physical Pad path.
-            restore_physical_pad();
+            self.wire.on_call_end(peers);
             self.events.push(EventKind::CallEnded {
                 session_id: id.to_string(),
                 reason: "wire_hangup".into(),
@@ -309,74 +446,75 @@ impl LiveAgent {
         let _ = self.audio.send(chunk);
     }
 
-    // --- backend side: idempotent commands, injected on the wire ---
+    // --------------------------------------------------------------- wire out
+
+    /// Pad keepalive for the current call (pad mode sends one per second, like
+    /// a real Pad; in tap mode the physical Pad does).
+    pub fn send_keepalive(&self) {
+        let peers = self.peers();
+        let active = self.call.lock().unwrap().machine.state().phase != CallPhase::Idle;
+        if !active {
+            return;
+        }
+        if let Some(endpoints) = peers.endpoints() {
+            if let Ok(packet) = session_control(OP_KEEPALIVE, &endpoints) {
+                let _ = self.wire.send_as_pad(&packet, &peers);
+            }
+        }
+    }
 
     fn execute(&self, action: CallAction, command_id: &str) -> CommandResult {
         if let Some(replayed) = self.commands.get(command_id) {
             return replayed;
         }
-        let opcode = match action {
-            CallAction::Claim => OP_ANSWER,
-            CallAction::Unlock => OP_UNLOCK,
-            CallAction::Hangup => OP_HANGUP,
-        };
+        let peers = self.peers();
         let session = self.session_string();
-        let outcome: Result<EventKind, CallError> = {
-            let mut call = self.call.lock().unwrap();
-            match action {
-                CallAction::Claim => call
-                    .machine
-                    .remote_answer()
-                    .map(|()| {
+        let built: Result<(EventKind, Vec<u8>), CallError> = match peers.endpoints() {
+            None => Err(CallError::NoCall),
+            Some(endpoints) => {
+                let mut call = self.call.lock().unwrap();
+                match action {
+                    CallAction::Claim => call.machine.remote_answer().map_err(CallError::from).and_then(|()| {
                         call.since_ms = Some(now_ms());
-                        EventKind::RemoteAnswered {
-                            session_id: session.clone(),
+                        session_control(OP_ANSWER, &endpoints)
+                            .map(|p| (EventKind::RemoteAnswered { session_id: session.clone() }, p))
+                            .map_err(|_| CallError::AgentOffline)
+                    }),
+                    CallAction::Unlock => call.machine.unlock(Instant::now()).map_err(CallError::from).and_then(|()| {
+                        session_control(OP_UNLOCK, &endpoints)
+                            .map(|p| (EventKind::Unlocked { session_id: session.clone(), by: Owner::Remote }, p))
+                            .map_err(|_| CallError::AgentOffline)
+                    }),
+                    CallAction::Hangup => {
+                        if call.machine.state().phase == CallPhase::Idle {
+                            Err(CallError::NoCall)
+                        } else {
+                            call.machine.hangup();
+                            call.since_ms = Some(now_ms());
+                            session_control(OP_HANGUP, &endpoints)
+                                .map(|p| (EventKind::CallEnded { session_id: session.clone(), reason: "remote_hangup".into() }, p))
+                                .map_err(|_| CallError::AgentOffline)
                         }
-                    })
-                    .map_err(CallError::from),
-                CallAction::Unlock => call
-                    .machine
-                    .unlock(Instant::now())
-                    .map(|()| EventKind::Unlocked {
-                        session_id: session.clone(),
-                        by: Owner::Remote,
-                    })
-                    .map_err(CallError::from),
-                CallAction::Hangup => {
-                    if call.machine.state().phase == CallPhase::Idle {
-                        Err(CallError::NoCall)
-                    } else {
-                        call.machine.hangup();
-                        call.since_ms = Some(now_ms());
-                        Ok(EventKind::CallEnded {
-                            session_id: session.clone(),
-                            reason: "remote_hangup".into(),
-                        })
                     }
                 }
             }
         };
-        let result = match outcome {
-            Ok(event) => {
-                // The state machine accepted it; now inject the packet.
-                if let Err(error) = inject_control(&self.socket, &self.config, opcode, self.next_seq())
-                {
-                    tracing::warn!(%error, ?action, "control injection failed");
-                    CommandResult::rejected(command_id, CallError::AgentOffline)
-                } else {
-                    // First-answer takeover: a remote claim silences and locks
-                    // out the physical Pad; a remote hangup restores it. Both
-                    // are fail-open inside their helpers.
-                    if opcode == OP_ANSWER {
-                        silence_physical_pad(&self.socket, &self.config, self.next_seq());
-                    }
-                    if opcode == OP_HANGUP {
-                        restore_physical_pad();
+        let result = match built {
+            Ok((event, packet)) => match self.wire.send_as_pad(&packet, &peers) {
+                Ok(()) => {
+                    match action {
+                        CallAction::Claim => self.wire.on_remote_claim(&peers),
+                        CallAction::Hangup => self.wire.on_call_end(&peers),
+                        CallAction::Unlock => {}
                     }
                     self.events.push(event);
                     CommandResult::ok(command_id)
                 }
-            }
+                Err(error) => {
+                    tracing::warn!(%error, ?action, "sending to the door failed");
+                    CommandResult::rejected(command_id, CallError::AgentOffline)
+                }
+            },
             Err(error) => CommandResult::rejected(command_id, error),
         };
         self.commands.store(&result);
@@ -385,23 +523,23 @@ impl LiveAgent {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-impl AgentControl for LiveAgent {
+impl AgentControl for Agent {
     fn agent_id(&self) -> String {
-        LIVE_AGENT_ID.into()
+        Agent::agent_id(self)
     }
 
     fn state(&self) -> CallState {
+        let peers = self.peers();
         let call = self.call.lock().unwrap();
         let state = call.machine.state();
         CallState {
             phase: state.phase,
             owner: state.owner,
             session_id: (state.phase != CallPhase::Idle).then(|| state.session_id.to_string()),
-            door_id: call.door_id.clone(),
-            room_id: call.room_id.clone(),
+            door_id: peers.door.as_ref().map(|d| d.id.clone()),
+            room_id: Some(peers.room.id.clone()),
             since_ms: call.since_ms,
-            agent_id: LIVE_AGENT_ID.into(),
+            agent_id: Agent::agent_id(self),
             connected: true,
             uptime_ms: self.started.elapsed().as_millis() as u64,
         }
@@ -421,8 +559,7 @@ impl AgentControl for LiveAgent {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-impl AgentMedia for LiveAgent {
+impl AgentMedia for Agent {
     fn clock_us(&self) -> u64 {
         self.started.elapsed().as_micros() as u64
     }
@@ -468,291 +605,199 @@ impl AgentMedia for LiveAgent {
     }
 
     fn talk(&self, chunk: AudioChunk) -> BoxFuture<'_, Result<(), CallError>> {
-        let allowed = {
-            let call = self.call.lock().unwrap();
-            let state = call.machine.state();
-            call.machine.remote_media_allowed(state.session_id)
-        };
-        let result = if allowed {
-            inject_audio(&self.socket, &self.config, 0, &chunk.pcm, self.next_seq())
-                .map(|_| ())
-                .map_err(|_| CallError::AgentOffline)
-        } else {
-            Err(CallError::UnlockNotAllowed)
-        };
+        let result = (|| {
+            let allowed = {
+                let call = self.call.lock().unwrap();
+                let state = call.machine.state();
+                call.machine.remote_media_allowed(state.session_id)
+            };
+            if !allowed {
+                return Err(CallError::UnlockNotAllowed);
+            }
+            let peers = self.peers();
+            let endpoints = peers.endpoints().ok_or(CallError::AgentOffline)?;
+            for frame in chunk.pcm.chunks(512) {
+                let mut pcm = frame.to_vec();
+                pcm.resize(512, 0);
+                let seq = self.audio_seq.fetch_add(1, Ordering::Relaxed) as u16;
+                let packet = audio_packet(seq, &pcm, &endpoints).map_err(|_| CallError::AgentOffline)?;
+                self.wire
+                    .send_as_pad(&packet, &peers)
+                    .map_err(|_| CallError::AgentOffline)?;
+            }
+            Ok(())
+        })();
         async move { result }.boxed()
     }
 }
 
-/// Open the bridge, start the blocking capture, and serve the live Agent over
-/// the HTTP control plane (REST + SSE). Linux only.
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-pub async fn run_live_agent(
-    server: ServerConfig,
-    intercom: IntercomConfig,
-    policy: LivePolicy,
-    history: Duration,
-    history_max_bytes: usize,
-) -> Result<()> {
-    MacAddress::parse(
-        intercom
-            .pad_mac
-            .as_deref()
-            .context("intercom.pad_mac is required in copy mode")?,
-    )?;
-    MacAddress::parse(
-        intercom
-            .door_mac
-            .as_deref()
-            .context("intercom.door_mac is required in copy mode")?,
-    )?;
-    anyhow::ensure!(
-        intercom.bridge_interface != "CONFIGURE_ME",
-        "bridge_interface is not configured"
-    );
-    let socket = Arc::new(PacketSocket::open(&intercom.bridge_interface)?);
-    // Clear any silence table left over from a previous run (fail-open).
-    restore_physical_pad();
-    let started = Instant::now();
-    let agent = LiveAgent::new(socket, intercom, policy, history, history_max_bytes, started);
+// ------------------------------------------------------------------- startup
 
-    let capture = agent.clone();
-    tokio::task::spawn_blocking(move || {
-        if let Err(error) = capture_loop(&capture, started) {
-            tracing::error!(%error, "live packet capture stopped");
-        }
-    });
-
-    tracing::info!(
-        listen = %server.listen,
-        interface = agent.socket.interface(),
-        "live Agent serving HTTP control plane"
-    );
-    crate::agent_server::serve(server, agent).await
+/// Everything `run_agent` needs; the CLI builds it from the config file plus
+/// overrides.
+pub struct Run {
+    pub server: ServerConfig,
+    pub intercom: IntercomConfig,
+    pub policy: Policy,
+    pub history: Duration,
+    pub history_max_bytes: usize,
+    pub discover_timeout: Duration,
 }
 
-/// Blocking bridge capture: filter door<->Pad control traffic, drive the call
-/// state machine, and fan out door media into the `LiveAgent`.
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-fn capture_loop(agent: &LiveAgent, started: Instant) -> Result<()> {
-    let config = &agent.config;
-    let socket = &agent.socket;
-    let door_mac = MacAddress::parse(config.door_mac.as_deref().context("door_mac missing")?)?;
-    let pad_mac = MacAddress::parse(config.pad_mac.as_deref().context("pad_mac missing")?)?;
-    let mut buffer = vec![0_u8; 65_536];
-    let mut jpeg = JpegReassembler::default();
-    let mut next_session = 1_u64;
-    loop {
-        let size = socket.receive(&mut buffer)?;
-        let Ok(udp) = EthernetUdp::parse(&buffer[..size]) else {
+/// Parse one MAC from `/proc/net/arp` text for `ip` (complete entries only).
+pub fn parse_arp_table(text: &str, ip: Ipv4Addr) -> Option<MacAddress> {
+    let want = ip.to_string();
+    for line in text.lines().skip(1) {
+        let mut cols = line.split_whitespace();
+        let (Some(addr), Some(_hw), Some(flags), Some(mac)) =
+            (cols.next(), cols.next(), cols.next(), cols.next())
+        else {
             continue;
         };
-        if udp.source_port != config.control_port && udp.destination_port != config.control_port {
-            continue;
+        if addr == want && flags != "0x0" {
+            return MacAddress::parse(mac).ok();
         }
-        if !matches!(udp.source_ip, ip if ip == config.door_ip || ip == config.room_ip) {
-            continue;
-        }
-        if (udp.source_ip == config.door_ip && udp.source_mac != door_mac)
-            || (udp.source_ip == config.room_ip && udp.source_mac != pad_mac)
-        {
-            continue;
-        }
-        for raw in split_coalesced(udp.payload) {
-            let Ok(message) = Message::parse(raw) else {
-                continue;
-            };
-            if message.family != FAMILY_SESSION {
-                continue;
+    }
+    None
+}
+
+fn parse_mac(text: Option<&str>, what: &str) -> Result<Option<MacAddress>> {
+    match text {
+        Some(text) if !text.is_empty() => MacAddress::parse(text)
+            .map(Some)
+            .with_context(|| format!("intercom.{what} is not a MAC address")),
+        _ => Ok(None),
+    }
+}
+
+/// Resolve identities, open the mode's wire, and serve the control plane.
+pub async fn run_agent(run: Run) -> Result<()> {
+    let ic = run.intercom;
+    anyhow::ensure!(
+        !ic.device_id.is_empty(),
+        "intercom.device_id (the Pad's room station id) is required"
+    );
+    let broadcast = ic.discovery_broadcast()?;
+    let mut peers = Peers {
+        room: Station::new(ic.device_id.clone(), ic.room_ip.unwrap_or(Ipv4Addr::UNSPECIFIED)),
+        door: ic
+            .door_id
+            .clone()
+            .filter(|id| !id.is_empty())
+            .map(|id| Station::new(id, ic.door_ip.unwrap_or(Ipv4Addr::UNSPECIFIED))),
+        door_mac: parse_mac(ic.door_mac.as_deref(), "door_mac")?,
+        pad_mac: parse_mac(ic.pad_mac.as_deref(), "pad_mac")?,
+        control_port: ic.control_port,
+    };
+
+    // Discovery (the private UDP 10008 "who has this station?").
+    if ic.mode == AgentMode::Tap && peers.room.ip.is_unspecified() {
+        match resolve_pad(&ic.device_id, broadcast, run.discover_timeout).await {
+            Ok(ip) => {
+                tracing::info!(%ip, id = %ic.device_id, "discovered the physical Pad");
+                peers.room.ip = ip;
             }
-            let Some(endpoints) = message.endpoints() else {
-                continue;
-            };
-            if endpoints.door.id != config.door_id
-                || endpoints.door.ip != config.door_ip
-                || endpoints.room.id != config.room_id
-                || endpoints.room.ip != config.room_ip
-            {
-                continue;
-            }
-            let is_idle =
-                agent.call.lock().unwrap().machine.state().phase == CallPhase::Idle;
-            match message.opcode {
-                OP_REQUEST if is_idle => {
-                    let id = next_session;
-                    next_session += 1;
-                    agent.on_call_started(id, endpoints.door.id, endpoints.room.id);
+            Err(error) => tracing::warn!(%error, "physical Pad not found by discovery; will learn it from the first call"),
+        }
+    }
+    if let Some(door) = peers.door.as_mut() {
+        if door.ip.is_unspecified() {
+            match resolve_pad(&door.id, broadcast, run.discover_timeout).await {
+                Ok(ip) => {
+                    tracing::info!(%ip, id = %door.id, "discovered the door station");
+                    door.ip = ip;
                 }
-                OP_ANSWER if udp.source_ip == config.room_ip => agent.on_pad_answer(),
-                OP_UNLOCK if udp.source_ip == config.room_ip => agent.on_pad_unlock(),
-                OP_HANGUP if !is_idle => agent.on_wire_hangup(),
-                _ => {}
-            }
-            if message.opcode != OP_MEDIA || udp.source_ip != config.door_ip {
-                continue;
-            }
-            let Some(media) = message.media() else {
-                continue;
-            };
-            let pts_us = started.elapsed().as_micros() as u64;
-            if media.media_type == MEDIA_AUDIO {
-                agent.push_audio(AudioChunk {
-                    pts_us,
-                    pcm: Arc::from(media.data),
-                });
-            } else if let Some(frame) = jpeg.push(&media) {
-                agent.push_video(VideoFrame {
-                    pts_us,
-                    jpeg: Arc::from(frame.as_slice()),
-                });
+                Err(error) => tracing::warn!(%error, "door not found by discovery; will learn it from the first call"),
             }
         }
     }
-}
 
-/// Install the silence table and inject a spoofed door→Pad hangup so the
-/// physical Pad stops ringing at once. Every step is fail-open: a failure
-/// leaves the Pad working and is only logged.
-///
-/// NOTE: needs authorized on-device validation. The capture shows the door
-/// station uses a door→Pad `00b7/1e` to tear the call down, so the reset
-/// reuses that exact envelope, but that a *mid-call* injected hangup silences
-/// this Pad model is not proven by `pad.cap` alone.
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-fn silence_physical_pad(socket: &PacketSocket, config: &IntercomConfig, sequence: u32) {
-    match crate::firewall::pad_silence_rules(config) {
-        Ok(rules) => {
-            if let Err(error) = nft_apply(&rules) {
-                tracing::warn!(%error, "failed to install Pad silence rules; Pad stays live");
-            } else {
-                tracing::info!("physical Pad silenced (door<->Pad control dropped)");
+    let agent = match ic.mode {
+        AgentMode::Pad => {
+            let wire = crate::wire_udp::UdpWire::bind(ic.pad_listen).await?;
+            let agent = Agent::new(
+                ic.mode,
+                wire.clone() as Arc<dyn Wire>,
+                peers,
+                run.policy,
+                run.history,
+                run.history_max_bytes,
+            );
+            tokio::spawn(wire.clone().run(agent.clone()));
+            tokio::spawn(crate::wire_udp::discovery_responder(ic.discovery_port, ic.device_id.clone()));
+            let keepalive = agent.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(1));
+                loop {
+                    tick.tick().await;
+                    keepalive.send_keepalive();
+                }
+            });
+            agent
+        }
+        AgentMode::Tap => {
+            #[cfg(all(target_os = "linux", feature = "linux-packet"))]
+            {
+                let wire = crate::wire_tap::TapWire::open(&ic)?;
+                // MACs from the neighbour table for anything discovery pinned.
+                if peers.pad_mac.is_none() && !peers.room.ip.is_unspecified() {
+                    peers.pad_mac = crate::wire_tap::neighbor_mac(peers.room.ip);
+                    tracing::info!(mac = ?peers.pad_mac, "Pad MAC from the neighbour table");
+                }
+                if let Some(door) = &peers.door {
+                    if peers.door_mac.is_none() && !door.ip.is_unspecified() {
+                        peers.door_mac = crate::wire_tap::neighbor_mac(door.ip);
+                        tracing::info!(mac = ?peers.door_mac, "door MAC from the neighbour table");
+                    }
+                }
+                let agent = Agent::new(
+                    ic.mode,
+                    wire.clone() as Arc<dyn Wire>,
+                    peers,
+                    run.policy,
+                    run.history,
+                    run.history_max_bytes,
+                );
+                let capture = agent.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Err(error) = wire.run(&capture) {
+                        tracing::error!(%error, "bridge capture stopped");
+                    }
+                });
+                agent
+            }
+            #[cfg(not(all(target_os = "linux", feature = "linux-packet")))]
+            {
+                let _ = peers;
+                anyhow::bail!("tap mode needs Linux and --features linux-packet; use mode = \"pad\" here")
             }
         }
-        Err(error) => tracing::warn!(%error, "cannot build Pad silence rules"),
-    }
-    if let Err(error) = inject_pad_reset(socket, config, sequence) {
-        tracing::warn!(%error, "failed to inject door->Pad hangup reset");
-    }
-}
-
-/// Remove the silence table so the physical Pad path is restored.
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-fn restore_physical_pad() {
-    if let Err(error) = nft_flush() {
-        tracing::warn!(%error, "failed to flush Pad silence table");
-    } else {
-        tracing::info!("physical Pad path restored");
-    }
-}
-
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-fn nft_apply(rules: &str) -> Result<()> {
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new("nft")
-        .arg("-f")
-        .arg("-")
-        .stdin(Stdio::piped())
-        .spawn()
-        .context("spawning nft")?;
-    child
-        .stdin
-        .take()
-        .context("nft stdin")?
-        .write_all(rules.as_bytes())?;
-    let status = child.wait()?;
-    anyhow::ensure!(status.success(), "nft -f exited with {status}");
-    Ok(())
-}
-
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-fn nft_flush() -> Result<()> {
-    let status = std::process::Command::new("nft")
-        .args(crate::firewall::flush_table_command().split_whitespace())
-        .status()
-        .context("running nft delete")?;
-    // A missing table is fine; the goal is that it is gone.
-    let _ = status;
-    Ok(())
-}
-
-/// Inject a `00b7/1e` hangup addressed door→Pad (source door, dest Pad), the
-/// reverse of [`inject_payload`], so only the physical Pad sees it.
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-fn inject_pad_reset(socket: &PacketSocket, config: &IntercomConfig, sequence: u32) -> Result<()> {
-    let endpoints = Endpoints {
-        door: crate::protocol::Station::new(&config.door_id, config.door_ip),
-        room: crate::protocol::Station::new(&config.room_id, config.room_ip),
     };
-    let payload = session_control(OP_HANGUP, &endpoints)?;
-    let pad_mac = MacAddress::parse(config.pad_mac.as_deref().context("pad_mac missing")?)?;
-    let door_mac = MacAddress::parse(config.door_mac.as_deref().context("door_mac missing")?)?;
-    let ethernet = build_udp_ipv4(
-        door_mac,
-        pad_mac,
-        config.door_ip,
-        config.room_ip,
-        config.control_port,
-        config.control_port,
-        &payload,
-        sequence as u16,
-    )?;
-    let sent = socket.send(&ethernet)?;
-    anyhow::ensure!(sent == ethernet.len(), "short AF_PACKET send");
-    Ok(())
+
+    tracing::info!(
+        mode = agent.mode().as_str(),
+        device = %agent.device_id(),
+        http = %run.server.listen,
+        "Agent serving the HTTP control plane"
+    );
+    crate::agent_server::serve(run.server, agent).await
 }
 
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-fn inject_control(
-    socket: &PacketSocket,
-    config: &IntercomConfig,
-    opcode: u32,
-    sequence: u32,
-) -> Result<()> {
-    let endpoints = Endpoints {
-        door: crate::protocol::Station::new(&config.door_id, config.door_ip),
-        room: crate::protocol::Station::new(&config.room_id, config.room_ip),
-    };
-    let payload = session_control(opcode, &endpoints)?;
-    inject_payload(socket, config, &payload, sequence)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-fn inject_audio(
-    socket: &PacketSocket,
-    config: &IntercomConfig,
-    audio_sequence: u16,
-    pcm: &[u8],
-    ip_sequence: u32,
-) -> Result<()> {
-    let endpoints = Endpoints {
-        door: crate::protocol::Station::new(&config.door_id, config.door_ip),
-        room: crate::protocol::Station::new(&config.room_id, config.room_ip),
-    };
-    let payload = audio_packet(audio_sequence, pcm, &endpoints)?;
-    inject_payload(socket, config, &payload, ip_sequence)
-}
-
-#[cfg(all(target_os = "linux", feature = "linux-packet"))]
-fn inject_payload(
-    socket: &PacketSocket,
-    config: &IntercomConfig,
-    payload: &[u8],
-    sequence: u32,
-) -> Result<()> {
-    let pad_mac = MacAddress::parse(config.pad_mac.as_deref().context("pad_mac missing")?)?;
-    let door_mac = MacAddress::parse(config.door_mac.as_deref().context("door_mac missing")?)?;
-    let ethernet = build_udp_ipv4(
-        pad_mac,
-        door_mac,
-        config.room_ip,
-        config.door_ip,
-        config.control_port,
-        config.control_port,
-        payload,
-        sequence as u16,
-    )?;
-    let sent = socket.send(&ethernet)?;
-    anyhow::ensure!(sent == ethernet.len(), "short AF_PACKET send");
-    Ok(())
+    #[test]
+    fn arp_table_parsing_picks_complete_entries() {
+        let text = "IP address       HW type     Flags       HW address            Mask     Device\n\
+                    192.168.124.61   0x1         0x2         aa:bb:cc:dd:ee:3d     *        br-lan\n\
+                    192.168.124.2    0x1         0x0         00:00:00:00:00:00     *        br-lan\n";
+        assert_eq!(
+            parse_arp_table(text, Ipv4Addr::new(192, 168, 124, 61)),
+            MacAddress::parse("aa:bb:cc:dd:ee:3d").ok()
+        );
+        // Incomplete (flags 0x0) entries are not trusted.
+        assert_eq!(parse_arp_table(text, Ipv4Addr::new(192, 168, 124, 2)), None);
+        assert_eq!(parse_arp_table(text, Ipv4Addr::new(10, 0, 0, 1)), None);
+    }
 }

@@ -21,12 +21,12 @@ The complete evidence-backed wire description is in
 | Capture parser, GRO split, JPEG reconstruction, PCM extraction | implemented and tested against `testdata/pad.cap` |
 | Exact answer/unlock/hangup encoders | implemented |
 | First-answer state machine, unlock authorization, cooldown, idempotency | implemented |
-| pcap replay Agent with capture timing (`fake-agent`) | implemented |
-| Agent interface (`AgentControl` / `AgentMedia` traits) | implemented; used by the replay Agent, the live Agent, and the HTTP server |
+| pcap replay Agent with capture timing (`tools fake-agent`) | implemented |
+| Agent interface (`AgentControl` / `AgentMedia` traits) | implemented; used by the replay Agent, both Agent wire modes, the door station, and the HTTP server |
 | HTTP control plane: REST + SSE, negotiation, bearer auth, Swagger UI | the only backend transport; verified end to end against the replay Agent |
 | Pre-roll media buffer (configurable seconds / bytes) | implemented |
 | RTSP data plane (RTP/JPEG + PCMU, no re-encoding) | designed and validated with the captured frames; **not implemented yet** |
-| Linux AF_PACKET capture Agent (`LiveAgent`) over HTTP, with raw control injection | implemented; needs authorized on-device validation |
+| Agent `tap` mode: Linux AF_PACKET bridge capture + raw control injection over HTTP | implemented; needs authorized on-device validation |
 | Manual Pad blocking rule generator | implemented |
 | Automatic NFQUEUE first-answer arbitration | **not complete; do not deploy automatic mode** |
 
@@ -46,7 +46,7 @@ python3 -m unittest discover -v     # legacy Python analyzer tests
 Analyze the capture:
 
 ```sh
-cargo run -- analyze testdata/pad.cap
+cargo run -- tools analyze testdata/pad.cap
 ```
 
 ## Agent control plane (HTTP)
@@ -85,16 +85,16 @@ and served at `/openapi.yaml`).
   (currently held); `history_secs = 0` disables it.
 
 The Rust side is split by interface: `agent_api` (the traits every backend
-uses), `replay_agent` (in-process pcap replay), `agent` (`LiveAgent`, the Linux
-AF_PACKET capture Agent), and `agent_server` (the HTTP adapter over any
-implementation, no HTTP crate needed). Standalone builds call the traits
-directly; distributed builds go through HTTP. The HTTP control plane is the
-only backend transport.
+uses), `replay_agent` (in-process pcap replay), `agent` (the real Agent with
+its two wire modes, `wire_udp` for `pad` and `wire_tap` for `tap`), and
+`agent_server` (the HTTP adapter over any implementation, no HTTP crate needed).
+Standalone builds call the traits directly; distributed builds go through HTTP.
+The HTTP control plane is the only backend transport.
 
-Run the replay Agent with the control plane and Swagger UI:
+Run the replay Agent (a debugging tool) with the control plane and Swagger UI:
 
 ```sh
-cargo run -- fake-agent --repeat-after 4 --http 127.0.0.1:8080 --token secret --swagger
+cargo run -- tools fake-agent --repeat-after 4 --http 127.0.0.1:8080 --token secret --swagger
 curl -H 'Authorization: Bearer secret' -H 'Accept: application/json' http://127.0.0.1:8080/v1/state
 curl -N -H 'Authorization: Bearer secret' -H 'Accept: text/event-stream' http://127.0.0.1:8080/v1/events
 curl -X POST -H 'Authorization: Bearer secret' -H 'Accept: application/json' -H 'Content-Type: application/json' \
@@ -104,7 +104,7 @@ open http://127.0.0.1:8080/swagger
 
 ### Software door station
 
-`fake-agent` replays the capture on a fixed timeline (a locked demo). The
+`tools fake-agent` replays the capture on a fixed timeline (a locked demo). The
 `door` subcommand is the interactive counterpart: a software door station you
 operate, so a person can sit on the door side while the browser Pad or a
 backend acts as the room. It serves the same HTTP control plane.
@@ -130,7 +130,7 @@ Point the browser Pad or `scripts/agent-http-test.py` at it as usual; type
 `ring` in the door console to raise a call.
 
 To pretend to be the door station and ring a **real** room Pad (or another
-Agent), `emit-door` synthesizes the call from the protocol — it does not
+Agent), `tools emit-door` synthesizes the call from the protocol — it does not
 replay the capture. Every datagram (`00b7/01` ring, `00b7/0a` video and
 audio, keepalive, hangup) is built by our code from a configured door/room
 identity, so a real Pad's response tells you whether the protocol analysis is
@@ -138,9 +138,9 @@ right. The camera is a directory of JPEG files (a fake camera device); audio
 is a raw-PCM file or silence.
 
 ```sh
-cargo run -- emit-door 192.168.104.108
+cargo run -- tools emit-door 192.168.104.108
 # room IP defaults to the target; set the Pad's own station id if it checks it:
-cargo run -- emit-door 192.168.104.108 --room-id S00XXXXXXXXX --frames testdata/frames
+cargo run -- tools emit-door 192.168.104.108 --room-id S00XXXXXXXXX --frames testdata/frames
 ```
 
 It binds the control port, sends the ring, streams video/audio and keepalives,
@@ -157,12 +157,12 @@ The Pad's IP can be resolved from its room Station ID over the private UDP
 answers from its own address):
 
 ```sh
-cargo run -- resolve S00000000000 --broadcast 192.168.124.255
+cargo run -- tools resolve S00000000000 --broadcast 192.168.124.255
 # S00000000000 -> 192.168.124.61
-cargo run -- emit-door --room-id S00000000000 --broadcast 192.168.124.255
+cargo run -- tools emit-door --room-id S00000000000 --broadcast 192.168.124.255
 ```
 
-Discovery is built into `emit-door`: omit the target and it resolves the Pad
+Discovery is built into `tools emit-door`: omit the target and it resolves the Pad
 IP from `--room-id` over UDP 10008 (`--broadcast` sets where to ask, default
 `255.255.255.255`), then rings it. Pass an explicit `ip` / `ip:port` target to
 skip discovery. `scripts/fake-pad-discovery.py` answers a discovery query for
@@ -175,10 +175,10 @@ and sends a voice packet so the emulator can be tested end to end without
 hardware. This is the harness for validating the Agent and, later, the
 HAP/Matter backends when the real door and Pad are far apart.
 
-### Full loop on one machine: `pad-agent`
+### Full loop on one machine: `agent --mode pad`
 
-`pad-agent` is a user-space Pad-side Agent over a plain UDP socket, so the whole
-chain runs on a laptop with no hardware and no bridge: `emit-door` (the
+In `pad` mode the Agent *is* the Pad on a plain UDP socket, so the whole chain
+runs on a laptop with no hardware and no bridge: `tools emit-door` (the
 synthesized door) rings it, it answers the paging / bootstrap / session
 handshake and fans the door's video and audio out over the same HTTP control
 plane, and the browser Pad drives it. Answer / unlock / talk from the browser
@@ -186,19 +186,19 @@ are sent back to the door as Pad-originated packets. Unlike the live Agent it
 needs no AF_PACKET, so it runs on macOS too.
 
 ```sh
-# terminal 1: the software Pad + HTTP control plane (+ browser Pad at /)
-cargo run -- pad-agent --listen 127.0.0.1:10000 --http 127.0.0.1:8080
+# terminal 1: the Agent as the Pad + HTTP control plane (+ browser Pad at /)
+cargo run -- agent --mode pad --device-id S00000000000 --http 127.0.0.1:8080
 
 # terminal 2: ring it as a synthesized door station
-cargo run -- emit-door 127.0.0.1 --frames testdata/frames
+cargo run -- tools emit-door 127.0.0.1 --frames testdata/frames
 ```
 
 Then open `http://127.0.0.1:8080/`: the page rings, shows the door picture,
 and its answer / unlock / talk buttons drive `emit-door` (which prints the
 `00b7/05` answer, `00b7/06` unlock and voice it receives back). `emit-door`
-binds an ephemeral port automatically when `pad-agent` already holds the
-control port. Add `--discover` to `pad-agent` to also answer UDP 10008 so
-`emit-door --discover` can find it.
+binds an ephemeral port automatically when the Agent already holds the
+control port. `pad` mode answers UDP 10008 discovery, so `tools emit-door
+--discover` can find it too.
 
 ### Browser Pad
 
@@ -212,7 +212,7 @@ step; the token is stored in the browser and appended as `?token=` where
 headers are impossible (`EventSource`, `<img>`, WebSocket).
 
 ```sh
-cargo run -- fake-agent --repeat-after 4 --http 127.0.0.1:8080 --token secret
+cargo run -- tools fake-agent --repeat-after 4 --http 127.0.0.1:8080 --token secret
 open http://127.0.0.1:8080/pad      # enter "secret" in the settings dialog
 ```
 
@@ -275,8 +275,8 @@ physical Pad unblocked. Validate passive capture logs. Then print and review the
 manual rule:
 
 ```sh
-/usr/sbin/michoi check-config /etc/michoi/config.toml
-/usr/sbin/michoi nft-rules /etc/michoi/config.toml
+/usr/sbin/michoi tools check-config /etc/michoi/config.toml
+/usr/sbin/michoi tools nft-rules /etc/michoi/config.toml
 /usr/sbin/michoi agent /etc/michoi/config.toml
 ```
 

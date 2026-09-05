@@ -5,25 +5,138 @@
 //! apart. Commands still run through the production call state machine and
 //! the exact packet encoders, they just are not injected anywhere.
 
+use std::net::Ipv4Addr;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
 use tokio::sync::broadcast;
 use tokio::time::{sleep_until, Instant as TokioInstant};
 
-use crate::agent::{replay_timeline, TimedFrame};
 use crate::agent_api::{
     now_ms, AgentControl, AgentMedia, AudioChunk, AudioInfo, CallAction, CallError, CallState,
     CommandCache, CommandResult, Event, EventKind, EventLog, MediaHistory, MediaInfo, MediaRing,
     Owner, VideoFrame, VideoInfo,
 };
-use crate::protocol::{audio_packet, session_control, Endpoints, OP_ANSWER, OP_HANGUP, OP_UNLOCK};
+use crate::pcap::read_udp;
+use crate::protocol::{
+    audio_packet, session_control, split_coalesced, Endpoints, JpegReassembler, Message,
+    FAMILY_SESSION, MEDIA_AUDIO, OP_ANSWER, OP_HANGUP, OP_MEDIA, OP_REQUEST, OP_UNLOCK,
+};
 use crate::state::{CallMachine, CallPhase};
-use crate::transport::{AgentEvent, FrameKind};
+use crate::transport::{AgentEvent, FrameKind, WireFrame};
+
+#[derive(Debug, Clone)]
+pub struct TimedFrame {
+    pub offset_micros: u64,
+    pub frame: WireFrame,
+}
+
+pub fn replay_timeline(path: impl AsRef<Path>) -> Result<Vec<TimedFrame>> {
+    let records = read_udp(path)?;
+    let first_session = records
+        .iter()
+        .flat_map(|record| {
+            split_coalesced(&record.payload)
+                .into_iter()
+                .map(move |raw| (record, raw))
+        })
+        .find_map(|(record, raw)| {
+            let msg = Message::parse(raw).ok()?;
+            (msg.family == FAMILY_SESSION && msg.opcode == OP_REQUEST)
+                .then_some(record.timestamp_micros)
+        })
+        .context("pcap has no PENGUIN0 session request")?;
+    let mut jpeg = JpegReassembler::default();
+    let mut out = Vec::new();
+    let mut sequence = 0_u32;
+    let mut session_id = 0_u64;
+    let mut started = false;
+    let mut ended = false;
+
+    for record in &records {
+        if record.timestamp_micros < first_session {
+            continue;
+        }
+        for raw in split_coalesced(&record.payload) {
+            let Ok(msg) = Message::parse(raw) else {
+                continue;
+            };
+            if msg.family != FAMILY_SESSION {
+                continue;
+            }
+            let offset = record.timestamp_micros - first_session;
+            if msg.opcode == OP_REQUEST && !started {
+                started = true;
+                session_id = first_session.max(1);
+                let endpoints = msg.endpoints().unwrap_or_else(Endpoints::captured);
+                let event = AgentEvent::CallStarted {
+                    door_id: endpoints.door.id,
+                    room_id: endpoints.room.id,
+                };
+                out.push(TimedFrame {
+                    offset_micros: offset,
+                    frame: WireFrame::cbor(FrameKind::Event, session_id, sequence, offset, &event)?,
+                });
+                sequence += 1;
+            }
+            if msg.opcode == OP_ANSWER || msg.opcode == OP_UNLOCK {
+                let event = AgentEvent::PadActionObserved { opcode: msg.opcode };
+                out.push(TimedFrame {
+                    offset_micros: offset,
+                    frame: WireFrame::cbor(FrameKind::Event, session_id, sequence, offset, &event)?,
+                });
+                sequence += 1;
+            }
+            if msg.opcode == OP_HANGUP && !ended {
+                ended = true;
+                let event = AgentEvent::CallEnded {
+                    reason: "captured_hangup".into(),
+                };
+                out.push(TimedFrame {
+                    offset_micros: offset,
+                    frame: WireFrame::cbor(FrameKind::Event, session_id, sequence, offset, &event)?,
+                });
+                sequence += 1;
+            }
+            if msg.opcode != OP_MEDIA || record.source_ip != Ipv4Addr::new(192, 168, 124, 2) {
+                continue;
+            }
+            let Some(media) = msg.media() else { continue };
+            if media.media_type == MEDIA_AUDIO {
+                out.push(TimedFrame {
+                    offset_micros: offset,
+                    frame: WireFrame {
+                        kind: FrameKind::DoorPcm,
+                        flags: 0,
+                        session_id,
+                        sequence,
+                        timestamp_micros: offset,
+                        payload: media.data.to_vec(),
+                    },
+                });
+                sequence += 1;
+            } else if let Some(frame) = jpeg.push(&media) {
+                out.push(TimedFrame {
+                    offset_micros: offset,
+                    frame: WireFrame {
+                        kind: FrameKind::Jpeg,
+                        flags: 0,
+                        session_id,
+                        sequence,
+                        timestamp_micros: offset,
+                        payload: frame,
+                    },
+                });
+                sequence += 1;
+            }
+        }
+    }
+    Ok(out)
+}
 
 pub const AGENT_ID: &str = "fake-pad-cap";
 
