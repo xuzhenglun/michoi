@@ -7,105 +7,128 @@
 <title>门口机</title>
 <style>
   :root {
-    --bg: #0f1115; --panel: #171a21; --panel-2: #1f232c; --text: #e8eaf0; --muted: #8b91a0;
-    --line: #262b36; --accent: #4f8cff; --ok: #2ecc71; --danger: #ff5f56; --warn: #f5b942;
-    --shadow: 0 10px 30px rgba(0,0,0,.35);
+    --bg: #0e1013; --panel: #171a20; --panel-2: #21252d; --panel-3: #2a2f39; --text: #e9ebf0; --muted: #8d93a1;
+    --line: #2a2f3a; --accent: #4f8cff; --ok: #2fbf71; --danger: #ff5b57; --warn: #f5b942;
+    --shadow: 0 12px 36px rgba(0,0,0,.42);
   }
   @media (prefers-color-scheme: light) {
     :root {
-      --bg: #f4f5f8; --panel: #ffffff; --panel-2: #eef0f4; --text: #161922; --muted: #6b7280;
-      --line: #e3e6ec; --shadow: 0 10px 30px rgba(20,30,60,.10);
+      --bg: #f2f3f6; --panel: #ffffff; --panel-2: #eceef3; --panel-3: #e1e4eb; --text: #15181f; --muted: #6b7280;
+      --line: #e1e4ea; --shadow: 0 12px 36px rgba(20,30,60,.12);
     }
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html, body { height: 100%; margin: 0; }
   body {
     background: var(--bg); color: var(--text);
     font: 15px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", Inter, Roboto, sans-serif;
-    display: flex; flex-direction: column; min-height: 100dvh;
-    -webkit-tap-highlight-color: transparent;
+    display: flex; flex-direction: column; min-height: 100dvh; -webkit-tap-highlight-color: transparent;
   }
-  header {
-    display: flex; align-items: center; gap: 12px; padding: 14px 18px;
-    padding-top: max(14px, env(safe-area-inset-top));
-  }
-  header h1 { font-size: 17px; font-weight: 600; margin: 0; letter-spacing: .2px; }
-  .pill {
-    display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px;
-    background: var(--panel-2); color: var(--muted); font-size: 13px; font-weight: 500;
-  }
-  .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  svg { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+  /* ---- header ---- */
+  header { display: flex; align-items: center; gap: 12px; padding: 12px 18px; padding-top: max(12px, env(safe-area-inset-top)); }
+  header h1 { font-size: 16px; font-weight: 600; margin: 0; letter-spacing: .2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pill { display: inline-flex; align-items: center; gap: 8px; padding: 5px 11px; border-radius: 999px; background: var(--panel-2); color: var(--muted); font-size: 12.5px; font-weight: 500; white-space: nowrap; }
+  .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
   .pill.ringing .dot { background: var(--warn); animation: pulse 1s infinite; }
-  .pill.connected .dot { background: var(--ok); }
+  .pill.live .dot { background: var(--ok); }
   .pill.offline .dot { background: var(--danger); }
   @keyframes pulse { 0%,100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.6); opacity: .5; } }
   .spacer { flex: 1; }
-  button.icon {
-    background: transparent; border: 0; color: var(--muted); width: 36px; height: 36px; border-radius: 10px; cursor: pointer;
-  }
+  button.icon { background: transparent; border: 0; color: var(--muted); width: 36px; height: 36px; border-radius: 10px; cursor: pointer; display: grid; place-items: center; }
   button.icon:hover { background: var(--panel-2); color: var(--text); }
-  main { flex: 1; display: flex; flex-direction: column; gap: 16px; padding: 0 18px 18px; max-width: 980px; width: 100%; margin: 0 auto; }
-  .video {
-    position: relative; background: #000; border-radius: 18px; overflow: hidden; box-shadow: var(--shadow);
-    aspect-ratio: 4 / 3; max-height: 62dvh; display: grid; place-items: center;
-  }
-  .video img { width: 100%; height: 100%; object-fit: contain; display: block; }
-  .video .badge {
-    position: absolute; left: 14px; top: 14px; padding: 6px 10px; border-radius: 10px; font-size: 12px;
-    background: rgba(0,0,0,.55); color: #fff; backdrop-filter: blur(6px);
-  }
-  .video .age { position: absolute; right: 14px; bottom: 12px; font-size: 12px; color: rgba(255,255,255,.7); }
-  .controls { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
-  .ctl {
-    display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 14px 6px;
-    background: var(--panel); border: 1px solid var(--line); border-radius: 16px; color: var(--text);
-    cursor: pointer; user-select: none; -webkit-user-select: none; touch-action: none;
-    transition: transform .08s ease, background .15s ease, opacity .15s ease;
-  }
-  .ctl:active { transform: scale(.97); }
-  .ctl[disabled] { opacity: .35; cursor: not-allowed; transform: none; }
-  .ctl .ring { width: 54px; height: 54px; border-radius: 50%; display: grid; place-items: center; color: #fff; }
-  .ctl.answer .ring { background: var(--ok); }
-  .ctl.unlock .ring { background: var(--accent); }
-  .ctl.hangup .ring { background: var(--danger); }
-  .ctl.talk .ring { background: #6b5cff; }
-  .ctl.talk.active { background: var(--panel-2); }
-  .ctl.talk.active .ring { box-shadow: 0 0 0 6px rgba(107,92,255,.25); }
-  .ctl span { font-size: 13px; color: var(--muted); }
-  .ctl svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-  .log {
-    background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 10px 14px;
-    max-height: 22dvh; overflow: auto; font-size: 13px;
-  }
+  button.icon svg { width: 20px; height: 20px; }
+
+  /* ---- stage ---- */
+  main { flex: 1; display: flex; flex-direction: column; gap: 14px; padding: 0 18px 12px; max-width: 1000px; width: 100%; margin: 0 auto; }
+  .stage { position: relative; background: #000; border-radius: 20px; overflow: hidden; box-shadow: var(--shadow); aspect-ratio: 16 / 10; max-height: 64dvh; }
+  .stage > img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .tag { position: absolute; padding: 5px 10px; border-radius: 9px; font-size: 12px; color: #fff; background: rgba(0,0,0,.5); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+  .tag.badge { left: 14px; top: 14px; display: inline-flex; align-items: center; gap: 6px; }
+  .tag.badge i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+  .tag.badge.live i { background: var(--ok); }
+  .tag.badge.ringing i { background: var(--warn); animation: pulse 1s infinite; }
+  .tag.peer { right: 14px; top: 14px; font-variant-numeric: tabular-nums; }
+  .pip { position: absolute; right: 14px; bottom: 14px; width: 28%; max-width: 210px; aspect-ratio: 4 / 3; border-radius: 12px; overflow: hidden; background: #000; border: 1px solid rgba(255,255,255,.28); box-shadow: 0 6px 18px rgba(0,0,0,.4); }
+  .pip video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); display: block; }
+
+  /* ---- toolbar (meeting style) ---- */
+  .bar { display: flex; justify-content: center; align-items: flex-start; gap: 18px; flex-wrap: wrap; padding: 4px 0 2px; }
+  .group { display: flex; gap: 14px; align-items: flex-start; }
+  .divider { width: 1px; height: 44px; background: var(--line); margin: 6px 2px 0; align-self: flex-start; }
+  .item { display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 64px; }
+  .item .lbl { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .split { position: relative; display: flex; align-items: center; }
+  .rb { width: 56px; height: 56px; border-radius: 50%; border: 0; background: var(--panel-2); color: var(--text); display: grid; place-items: center; cursor: pointer; transition: transform .08s ease, background .15s ease, opacity .15s ease; }
+  .rb:hover { background: var(--panel-3); }
+  .rb:active { transform: scale(.95); }
+  .rb[disabled] { opacity: .32; cursor: not-allowed; transform: none; }
+  .rb svg { width: 24px; height: 24px; }
+  .rb .off-icon { display: none; }
+  .split.off .rb:not([disabled]) { background: rgba(255,91,87,.16); color: var(--danger); }
+  .split.off .rb .on-icon { display: none; }
+  .split.off .rb .off-icon { display: block; }
+  .rb.call { background: var(--ok); color: #fff; }
+  .rb.end { background: var(--danger); color: #fff; }
+  .rb.unlock { background: var(--accent); color: #fff; }
+  .rb.call:hover { filter: brightness(1.08); } .rb.end:hover { filter: brightness(1.08); } .rb.unlock:hover { filter: brightness(1.08); }
+  .chev { width: 22px; height: 30px; margin-left: 2px; border: 0; background: transparent; color: var(--muted); cursor: pointer; border-radius: 8px; display: grid; place-items: center; }
+  .chev:hover { background: var(--panel-2); color: var(--text); }
+  .chev svg { width: 14px; height: 14px; stroke-width: 2.4; }
+  .chev[disabled] { opacity: .32; cursor: not-allowed; }
+
+  /* ---- popover menus ---- */
+  .menu { position: absolute; bottom: calc(100% + 12px); left: 50%; transform: translateX(-50%); min-width: 232px; max-width: calc(100vw - 24px); background: var(--panel); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 6px; z-index: 30; }
+  .menu h4 { margin: 8px 10px 4px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  .menu .opt { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 9px; cursor: pointer; font-size: 14px; user-select: none; }
+  .menu .opt:hover { background: var(--panel-2); }
+  .menu .opt .check { width: 16px; height: 16px; color: var(--accent); visibility: hidden; flex: none; }
+  .menu .opt.sel .check { visibility: visible; }
+  .menu .opt.dis { opacity: .4; cursor: default; }
+  .menu .opt span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .menu .empty { padding: 8px 10px; color: var(--muted); font-size: 13px; }
+  .menu .range { display: flex; align-items: center; gap: 10px; padding: 8px 10px 10px; }
+  .menu .range svg { width: 16px; height: 16px; color: var(--muted); flex: none; }
+  .menu input[type=range] { flex: 1; accent-color: var(--accent); }
+  .menu hr { border: 0; border-top: 1px solid var(--line); margin: 6px 4px; }
+
+  /* ---- footer / log ---- */
+  footer { padding: 0 18px 14px; padding-bottom: max(14px, env(safe-area-inset-bottom)); max-width: 1000px; width: 100%; margin: 0 auto; }
+  .txt { background: transparent; border: 0; color: var(--muted); font: inherit; font-size: 12.5px; cursor: pointer; padding: 6px 8px; border-radius: 8px; display: inline-flex; align-items: center; gap: 6px; }
+  .txt:hover { background: var(--panel-2); color: var(--text); }
+  .txt svg { width: 14px; height: 14px; }
+  .log { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 8px 14px; max-height: 24dvh; overflow: auto; font-size: 13px; margin-top: 6px; }
   .log div { display: flex; gap: 10px; padding: 4px 0; border-bottom: 1px dashed var(--line); }
   .log div:last-child { border-bottom: 0; }
   .log time { color: var(--muted); font-variant-numeric: tabular-nums; flex: none; }
-  .toast {
-    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); padding: 10px 16px; border-radius: 12px;
-    background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow); font-size: 14px; opacity: 0;
-    transition: opacity .2s ease; pointer-events: none;
-  }
+
+  /* ---- toast / dialogs ---- */
+  .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); padding: 10px 16px; border-radius: 12px; background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow); font-size: 14px; opacity: 0; transition: opacity .2s ease; pointer-events: none; z-index: 50; max-width: 92vw; }
   .toast.show { opacity: 1; }
-  dialog {
-    background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 16px; padding: 20px; width: min(92vw, 380px);
-    box-shadow: var(--shadow);
-  }
-  dialog::backdrop { background: rgba(0,0,0,.45); }
-  dialog h2 { margin: 0 0 12px; font-size: 16px; }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 18px; padding: 22px; width: min(92vw, 400px); box-shadow: var(--shadow); }
+  dialog::backdrop { background: rgba(0,0,0,.5); backdrop-filter: blur(2px); }
+  dialog h2 { margin: 0 0 14px; font-size: 16px; }
   dialog label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 6px; }
   dialog input { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); font: inherit; }
-  dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
-  dialog button { padding: 8px 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); cursor: pointer; }
-  dialog button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .hint { font-size: 12px; color: var(--muted); }
-  @media (max-width: 520px) { .controls { gap: 8px; } .ctl { padding: 12px 4px; } .ctl .ring { width: 48px; height: 48px; } }
-.extras{display:flex;flex-direction:column;align-items:center;gap:8px;margin:8px 0}
-.extras .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center}
-.mini{padding:8px 14px;border-radius:10px;border:1px solid var(--line);background:var(--panel-2);color:var(--text);font-size:14px;cursor:pointer}
-.mini:disabled{opacity:.45;cursor:default}
-.extras select,.extras input{padding:8px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel-2);color:var(--text);font-size:14px}
-.extras input{min-width:180px}
-.extras input::placeholder{color:var(--muted)}
+  dialog input::placeholder { color: var(--muted); }
+  dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+  dialog button { padding: 9px 16px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); cursor: pointer; font: inherit; }
+  dialog button.primary { background: var(--ok); border-color: var(--ok); color: #fff; }
+  dialog button.primary:disabled { opacity: .4; cursor: not-allowed; }
+  .hint { font-size: 12px; color: var(--muted); margin: 8px 0 0; }
+  dialog.sheet .dial-input { font: 500 30px/1.2 ui-monospace, "SF Mono", Menlo, Consolas, monospace; letter-spacing: .1em; text-align: center; padding: 14px; border-radius: 14px; }
+  dialog.sheet .preview { text-align: center; font-variant-numeric: tabular-nums; min-height: 18px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; justify-content: center; }
+  .chip { padding: 6px 12px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--line); font-size: 13px; cursor: pointer; font-variant-numeric: tabular-nums; }
+  .chip:hover { background: var(--panel-3); }
+  @media (max-width: 560px) {
+    dialog.sheet { margin: auto auto 0; width: 100vw; max-width: 100vw; border-radius: 20px 20px 0 0; padding-bottom: max(22px, env(safe-area-inset-bottom)); }
+    .bar { gap: 12px; } .group { gap: 10px; } .item { min-width: 58px; } .rb { width: 52px; height: 52px; }
+    .divider { display: none; }
+    .stage { border-radius: 16px; aspect-ratio: 4 / 3; }
+  }
 </style>
 </head>
 <body>
@@ -113,67 +136,141 @@
   <h1 id="title">门口机</h1>
   <span class="pill" id="status"><span class="dot"></span><span id="statusText">连接中</span></span>
   <span class="spacer"></span>
-  <button class="icon" id="soundBtn" title="声音" aria-label="声音">
-    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/><path id="soundWave" d="M15.5 8.5a5 5 0 0 1 0 7M19 5a9 9 0 0 1 0 14"/></svg>
-  </button>
   <button class="icon" id="settingsBtn" title="设置" aria-label="设置">
-    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
   </button>
 </header>
 
 <main>
-  <section class="video">
-    <img id="video" alt="门口画面">
-    <span class="badge" id="badge">离线</span>
-    <span class="age" id="age"></span>
+  <section class="stage">
+    <img id="video" alt="画面">
+    <span class="tag badge" id="badge"><i></i><span id="badgeText">离线</span></span>
+    <span class="tag peer" id="peer" hidden></span>
+    <div class="pip" id="pip" hidden></div>
   </section>
 
-  <section class="controls">
-    <button class="ctl answer" id="answerBtn" disabled>
-      <span class="ring"><svg viewBox="0 0 24 24"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8.1 9.7a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.8 2.1z"/></svg></span>
-      <span>接听</span>
-    </button>
-    <button class="ctl unlock" id="unlockBtn" disabled>
-      <span class="ring"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg></span>
-      <span>开锁</span>
-    </button>
-    <button class="ctl hangup" id="hangupBtn" disabled>
-      <span class="ring"><svg viewBox="0 0 24 24" style="transform:rotate(135deg)"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8.1 9.7a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.8 2.1z"/></svg></span>
-      <span>挂断</span>
-    </button>
-    <button class="ctl talk" id="talkBtn" disabled>
-      <span class="ring"><svg viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5M8 22h8"/></svg></span>
-      <span id="talkLabel">按住说话</span>
-    </button>
-  </section>
+  <section class="bar">
+    <!-- media: mic / camera / speaker, each with a settings dropdown -->
+    <div class="group">
+      <div class="item">
+        <div class="split" id="micSplit">
+          <button class="rb" id="micBtn" aria-label="麦克风" disabled>
+            <svg class="on-icon" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5M8 22h8"/></svg>
+            <svg class="off-icon" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5M8 22h8"/><path d="M3 3l18 18"/></svg>
+          </button>
+          <button class="chev" data-menu="micMenu" aria-label="麦克风选项"><svg viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg></button>
+          <div class="menu" id="micMenu" hidden></div>
+        </div>
+        <span class="lbl">麦克风</span>
+      </div>
+      <div class="item">
+        <div class="split" id="camSplit">
+          <button class="rb" id="camBtn" aria-label="摄像头" disabled>
+            <svg class="on-icon" viewBox="0 0 24 24"><rect x="3" y="7" width="13" height="10" rx="2"/><path d="M16 10l5-3v10l-5-3z"/></svg>
+            <svg class="off-icon" viewBox="0 0 24 24"><rect x="3" y="7" width="13" height="10" rx="2"/><path d="M16 10l5-3v10l-5-3z"/><path d="M3 3l18 18"/></svg>
+          </button>
+          <button class="chev" data-menu="camMenu" aria-label="摄像头选项"><svg viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg></button>
+          <div class="menu" id="camMenu" hidden></div>
+        </div>
+        <span class="lbl">摄像头</span>
+      </div>
+      <div class="item">
+        <div class="split" id="spkSplit">
+          <button class="rb" id="spkBtn" aria-label="喇叭">
+            <svg class="on-icon" viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a9 9 0 0 1 0 14"/></svg>
+            <svg class="off-icon" viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M22 9l-6 6M16 9l6 6"/></svg>
+          </button>
+          <button class="chev" data-menu="spkMenu" aria-label="喇叭选项"><svg viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg></button>
+          <div class="menu" id="spkMenu" hidden></div>
+        </div>
+        <span class="lbl">喇叭</span>
+      </div>
+    </div>
 
-  <section class="extras">
-    <div class="row">
-      <button class="mini" id="elevatorBtn" disabled>叫电梯</button>
-      <select id="cameraSelect" title="选择楼下摄像头"><option value="">摄像头…</option></select>
-      <button class="mini" id="viewBtn" disabled>查看</button>
-      <button class="mini" id="viewStopBtn" hidden>停止查看</button>
+    <div class="divider"></div>
+
+    <!-- contextual primary actions -->
+    <div class="group" id="actIdle">
+      <div class="item">
+        <button class="rb call" id="dialBtn" aria-label="拨号" disabled><svg viewBox="0 0 24 24"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8.1 9.7a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.8 2.1z"/></svg></button>
+        <span class="lbl">拨号</span>
+      </div>
+      <div class="item">
+        <div class="split">
+          <button class="rb" id="viewBtn" data-menu="viewMenu" aria-label="查看摄像头" disabled><svg viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></button>
+          <div class="menu" id="viewMenu" hidden></div>
+        </div>
+        <span class="lbl">查看</span>
+      </div>
+      <div class="item">
+        <button class="rb" id="elevatorBtn" aria-label="叫电梯" disabled><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 15V9m0 0-2.5 2.5M9 9l2.5 2.5M15 9v6m0 0 2.5-2.5M15 15l-2.5-2.5"/></svg></button>
+        <span class="lbl">电梯</span>
+      </div>
+      <div class="item">
+        <button class="rb unlock" id="unlockIdleBtn" aria-label="开锁" disabled><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg></button>
+        <span class="lbl">开锁</span>
+      </div>
     </div>
-    <div class="row">
-      <input id="dialInput" placeholder="拨号：室内机号码，如 3003" autocomplete="off" inputmode="numeric">
-      <button class="mini" id="dialBtn" disabled>拨号</button>
-      <button class="mini" id="camBtn" hidden>开摄像头</button>
-      <button class="mini" id="dialHangupBtn" hidden>挂断</button>
+
+    <div class="group" id="actRinging" hidden>
+      <div class="item">
+        <button class="rb call" id="answerBtn" aria-label="接听"><svg viewBox="0 0 24 24"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8.1 9.7a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.8 2.1z"/></svg></button>
+        <span class="lbl">接听</span>
+      </div>
+      <div class="item">
+        <button class="rb unlock" id="unlockRingBtn" aria-label="开锁"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg></button>
+        <span class="lbl">开锁</span>
+      </div>
+      <div class="item">
+        <button class="rb end" id="rejectBtn" aria-label="挂断"><svg viewBox="0 0 24 24" style="transform:rotate(135deg)"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8.1 9.7a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.8 2.1z"/></svg></button>
+        <span class="lbl">挂断</span>
+      </div>
     </div>
-    <div class="row" id="camParams" hidden>
-      <select id="camRes" title="分辨率">
-        <option value="640x480" selected>640×480</option>
-      </select>
-      <select id="camFps" title="帧率">
-        <option value="24" selected>24 fps</option>
-      </select>
+
+    <div class="group" id="actDoor" hidden>
+      <div class="item">
+        <button class="rb unlock" id="unlockBtn" aria-label="开锁"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg></button>
+        <span class="lbl">开锁</span>
+      </div>
+      <div class="item">
+        <button class="rb end" id="hangupBtn" aria-label="挂断"><svg viewBox="0 0 24 24" style="transform:rotate(135deg)"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8.1 9.7a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.8 2.1z"/></svg></button>
+        <span class="lbl">挂断</span>
+      </div>
+    </div>
+
+    <div class="group" id="actCalling" hidden>
+      <div class="item">
+        <button class="rb end" id="dialHangupBtn" aria-label="挂断"><svg viewBox="0 0 24 24" style="transform:rotate(135deg)"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8.1 9.7a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.8 2.1z"/></svg></button>
+        <span class="lbl">挂断</span>
+      </div>
+    </div>
+
+    <div class="group" id="actMonitor" hidden>
+      <div class="item">
+        <button class="rb end" id="viewStopBtn" aria-label="停止查看"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button>
+        <span class="lbl">停止查看</span>
+      </div>
     </div>
   </section>
-
-  <section class="log" id="log"></section>
 </main>
 
+<footer>
+  <button class="txt" id="logToggle"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/></svg>活动记录</button>
+  <section class="log" id="log" hidden></section>
+</footer>
+
 <div class="toast" id="toast"></div>
+
+<dialog id="dialSheet" class="sheet">
+  <h2>拨号</h2>
+  <input id="dialInput" class="dial-input" placeholder="室内机号码" autocomplete="off" inputmode="numeric" enterkeyhint="call">
+  <p class="hint preview" id="dialPreview">输入短号，如 3003</p>
+  <div class="chips" id="recent"></div>
+  <div class="row">
+    <button id="dialCancel">取消</button>
+    <button class="primary" id="dialGo" disabled>呼叫</button>
+  </div>
+</dialog>
 
 <dialog id="settings">
   <h2>连接设置</h2>
@@ -190,62 +287,176 @@
 (() => {
   'use strict';
   const $ = (id) => document.getElementById(id);
-  const state = { phase: 'idle', owner: 'none', online: false, token: localStorage.getItem('padToken') || '', seq: 0 };
+  const state = {
+    phase: 'idle', owner: 'none', online: false, monitoring: null, calling: null, callLabel: '', connected: false,
+    peer: '', deviceId: '', token: localStorage.getItem('padToken') || '',
+  };
   const el = {
-    status: $('status'), statusText: $('statusText'), badge: $('badge'), age: $('age'), video: $('video'),
-    answer: $('answerBtn'), unlock: $('unlockBtn'), hangup: $('hangupBtn'), talk: $('talkBtn'), talkLabel: $('talkLabel'),
-    log: $('log'), toast: $('toast'), settings: $('settings'), tokenInput: $('tokenInput'), soundWave: $('soundWave'),
-    elevator: $('elevatorBtn'), cameraSelect: $('cameraSelect'), view: $('viewBtn'), viewStop: $('viewStopBtn'),
-    dialInput: $('dialInput'), dial: $('dialBtn'), cam: $('camBtn'), dialHangup: $('dialHangupBtn'),
-    camParams: $('camParams'), camRes: $('camRes'), camFps: $('camFps'),
+    title: $('title'), status: $('status'), statusText: $('statusText'), badge: $('badge'), badgeText: $('badgeText'),
+    peer: $('peer'), video: $('video'), pip: $('pip'), toast: $('toast'), log: $('log'), logToggle: $('logToggle'),
+    micSplit: $('micSplit'), mic: $('micBtn'), camSplit: $('camSplit'), cam: $('camBtn'), spkSplit: $('spkSplit'), spk: $('spkBtn'),
+    micMenu: $('micMenu'), camMenu: $('camMenu'), spkMenu: $('spkMenu'), viewMenu: $('viewMenu'),
+    actIdle: $('actIdle'), actRinging: $('actRinging'), actDoor: $('actDoor'), actCalling: $('actCalling'), actMonitor: $('actMonitor'),
+    dial: $('dialBtn'), view: $('viewBtn'), elevator: $('elevatorBtn'), unlockIdle: $('unlockIdleBtn'),
+    answer: $('answerBtn'), unlockRing: $('unlockRingBtn'), reject: $('rejectBtn'), unlock: $('unlockBtn'), hangup: $('hangupBtn'),
+    dialHangup: $('dialHangupBtn'), viewStop: $('viewStopBtn'),
+    dialSheet: $('dialSheet'), dialInput: $('dialInput'), dialPreview: $('dialPreview'), recent: $('recent'), dialCancel: $('dialCancel'), dialGo: $('dialGo'),
+    settings: $('settings'), tokenInput: $('tokenInput'), apiHint: $('apiHint'),
   };
   const base = location.origin;
   const withToken = (path) => base + path + (state.token ? (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(state.token) : '');
   const headers = () => Object.assign({ 'Accept': 'application/json' }, state.token ? { 'Authorization': 'Bearer ' + state.token } : {});
+  const jsonHeaders = () => Object.assign(headers(), { 'Content-Type': 'application/json' });
+  const SECURE_MSG = '需要安全环境（https 或 http://localhost）才能使用麦克风/摄像头。可用 SSH 转发后访问 http://localhost:8080';
+  const secure = () => !!(window.isSecureContext && navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
 
   // ---------- UI helpers ----------
   let toastTimer;
-  function toast(text) {
-    el.toast.textContent = text; el.toast.classList.add('show');
-    clearTimeout(toastTimer); toastTimer = setTimeout(() => el.toast.classList.remove('show'), 2200);
-  }
+  function toast(text) { el.toast.textContent = text; el.toast.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => el.toast.classList.remove('show'), 2400); }
   function logLine(text) {
     const row = document.createElement('div');
     const t = document.createElement('time'); t.textContent = new Date().toLocaleTimeString('zh-CN', { hour12: false });
     const s = document.createElement('span'); s.textContent = text;
     row.append(t, s); el.log.prepend(row);
-    while (el.log.children.length > 60) el.log.lastChild.remove();
+    while (el.log.children.length > 80) el.log.lastChild.remove();
   }
+  el.logToggle.onclick = () => { el.log.hidden = !el.log.hidden; };
+
+  const ringing = () => state.phase === 'ringing';
+  const mine = () => state.phase === 'connected' && state.owner === 'remote';
+  const session = () => mine() || !!state.calling;           // two-way: mic usable
+
   function render() {
-    const labels = { idle: '空闲', ringing: '门口有人呼叫', connected: state.owner === 'remote' ? '通话中' : '室内机已接听', ending: '结束中' };
-    el.status.className = 'pill ' + (state.online ? state.phase : 'offline');
-    el.statusText.textContent = state.online ? labels[state.phase] || state.phase : '离线';
-    el.badge.textContent = state.online ? (state.phase === 'idle' ? '待机' : '实时') : '离线';
-    const ringing = state.phase === 'ringing';
-    const mine = state.phase === 'connected' && state.owner === 'remote';
-    el.answer.disabled = !(state.online && ringing);
-    el.unlock.disabled = !state.online;
-    el.hangup.disabled = !(state.online && (ringing || mine));
-    el.talk.disabled = !(state.online && mine);
-    el.elevator.disabled = !state.online;
-    el.view.disabled = !(state.online && !state.monitoring && el.cameraSelect.value !== '');
-    el.viewStop.hidden = !state.monitoring;
-    el.cam.hidden = !state.calling;
-    el.cam.textContent = camera ? '关摄像头' : '开摄像头';
-    el.camParams.hidden = !state.calling;
-    el.dial.disabled = !(state.online && !state.calling && !state.monitoring && el.dialInput.value.trim() !== '');
-    el.dialHangup.hidden = !state.calling;
-    document.title = ringing ? '🔔 门口有人呼叫' : '门口机';
+    const on = state.online, r = ringing(), m = mine(), c = !!state.calling, mon = !!state.monitoring;
+    const doorLive = state.phase === 'connected';
+    let text = '离线', cls = 'offline';
+    if (on) {
+      if (r) { text = '门口呼叫'; cls = 'ringing'; }
+      else if (m) { text = '通话中'; cls = 'live'; }
+      else if (doorLive) { text = '室内机已接听'; cls = 'live'; }
+      else if (c) { text = state.connected ? '通话中' : '呼叫中'; cls = 'live'; }
+      else if (mon) { text = '查看中'; cls = 'live'; }
+      else { text = '待机'; cls = ''; }
+    }
+    el.status.className = 'pill ' + cls; el.statusText.textContent = text;
+    const live = on && (r || doorLive || c || mon);
+    el.badge.className = 'tag badge ' + (r ? 'ringing' : live ? 'live' : '');
+    el.badgeText.textContent = on ? (live ? '实时' : '待机') : '离线';
+    const peer = r || doorLive ? state.peer : c ? (state.callLabel || c) : mon ? mon : '';
+    el.peer.hidden = !peer; el.peer.textContent = peer;
+
+    // media buttons
+    el.mic.disabled = !(on && session());
+    el.micSplit.classList.toggle('off', !talk);
+    el.cam.disabled = !(on && c);
+    el.camSplit.classList.toggle('off', !camera);
+    el.spkSplit.classList.toggle('off', !soundOn);
+    el.pip.hidden = !camera;
+
+    // contextual actions
+    const mode = !on ? 'idle' : r ? 'ringing' : doorLive ? 'door' : c ? 'calling' : mon ? 'monitor' : 'idle';
+    el.actIdle.hidden = mode !== 'idle'; el.actRinging.hidden = mode !== 'ringing'; el.actDoor.hidden = mode !== 'door';
+    el.actCalling.hidden = mode !== 'calling'; el.actMonitor.hidden = mode !== 'monitor';
+    el.dial.disabled = !on; el.view.disabled = !on; el.elevator.disabled = !on; el.unlockIdle.disabled = !on;
+    el.unlock.disabled = !on; el.hangup.disabled = !(on && m);
+    document.title = r ? '🔔 门口有人呼叫' : '门口机';
   }
 
-  // ---------- Ringtone (Web Audio, no assets) ----------
-  let audioCtx = null, audioGain = null, ringTimer = null, soundOn = localStorage.getItem('padSound') !== 'off';
-  function ctx() { if (!audioCtx) { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); audioGain = audioCtx.createGain(); audioGain.gain.value = soundOn ? 1 : 0; audioGain.connect(audioCtx.destination); } if (audioCtx.state === 'suspended') audioCtx.resume(); return audioCtx; }
+  // ---------- Popover menus ----------
+  let openMenuEl = null;
+  function closeMenus() { if (openMenuEl) { openMenuEl.hidden = true; openMenuEl = null; } }
+  function openMenu(menu) {
+    closeMenus(); menu.hidden = false; openMenuEl = menu;
+    menu.style.transform = 'translateX(-50%)';
+    const r = menu.getBoundingClientRect(), pad = 10; let dx = 0;
+    if (r.left < pad) dx = pad - r.left; else if (r.right > innerWidth - pad) dx = (innerWidth - pad) - r.right;
+    if (dx) menu.style.transform = 'translateX(calc(-50% + ' + dx + 'px))';
+  }
+  document.addEventListener('pointerdown', (e) => { if (openMenuEl && !openMenuEl.contains(e.target) && !e.target.closest('[data-menu]')) closeMenus(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeMenus(); });
+  function opt(label, selected, onPick, disabled) {
+    const d = document.createElement('div'); d.className = 'opt' + (selected ? ' sel' : '') + (disabled ? ' dis' : '');
+    d.innerHTML = '<svg class="check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg><span></span>';
+    d.lastChild.textContent = label;
+    if (!disabled) d.onclick = () => { onPick(); closeMenus(); };
+    return d;
+  }
+  function head(text) { const h = document.createElement('h4'); h.textContent = text; return h; }
+  function empty(text) { const d = document.createElement('div'); d.className = 'empty'; d.textContent = text; return d; }
+  async function devices(kind) { try { return (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === kind); } catch (e) { return []; } }
+  function deviceList(menu, kind, current, fallback, onPick) {
+    return devices(kind).then((list) => {
+      if (!list.length) { menu.append(empty(secure() ? '未发现设备' : '当前环境不可用')); return; }
+      list.forEach((d, i) => {
+        const label = d.label || (fallback + ' ' + (i + 1));
+        menu.append(opt(label, current ? d.deviceId === current : i === 0, () => onPick(d.deviceId)));
+      });
+    });
+  }
+
+  // preferences (device choice + camera geometry); resolutions/fps lists come from the Agent
+  const ui = { res: ['640x480'], resDef: '640x480', fps: [24], fpsDef: 24 };
+  const pref = {
+    mic: localStorage.getItem('padMic') || '', cam: localStorage.getItem('padCam') || '',
+    res: localStorage.getItem('padRes') || '', fps: Number(localStorage.getItem('padFps')) || 0,
+  };
+  const effRes = () => ui.res.includes(pref.res) ? pref.res : (ui.res.includes(ui.resDef) ? ui.resDef : ui.res[0]);
+  const effFps = () => ui.fps.includes(pref.fps) ? pref.fps : (ui.fps.includes(ui.fpsDef) ? ui.fpsDef : ui.fps[0]);
+
+  const builders = {
+    micMenu: async () => {
+      const m = el.micMenu; m.innerHTML = ''; m.append(head('麦克风'));
+      await deviceList(m, 'audioinput', pref.mic, '麦克风', (id) => { pref.mic = id; localStorage.setItem('padMic', id); if (talk) { stopTalk(); startTalk(); } });
+    },
+    camMenu: async () => {
+      const m = el.camMenu; m.innerHTML = ''; m.append(head('摄像头'));
+      await deviceList(m, 'videoinput', pref.cam, '摄像头', (id) => { pref.cam = id; localStorage.setItem('padCam', id); if (camera) { stopCamera(); startCamera(); } });
+      m.append(document.createElement('hr'), head('分辨率'));
+      for (const v of ui.res) m.append(opt(v.replace('x', '×'), v === effRes(), () => { pref.res = v; localStorage.setItem('padRes', v); applyCameraPrefs(); logLine('分辨率 → ' + v.replace('x', '×')); }));
+      m.append(document.createElement('hr'), head('帧率'));
+      for (const f of ui.fps) m.append(opt(f + ' fps', f === effFps(), () => { pref.fps = f; localStorage.setItem('padFps', String(f)); applyCameraPrefs(); logLine('帧率 → ' + f + ' fps'); }));
+    },
+    spkMenu: async () => {
+      const m = el.spkMenu; m.innerHTML = ''; m.append(head('音量'));
+      const row = document.createElement('div'); row.className = 'range';
+      row.innerHTML = '<svg viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4z"/></svg><input type="range" min="0" max="100" step="1"><svg viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a9 9 0 0 1 0 14"/></svg>';
+      const slider = row.querySelector('input'); slider.value = String(Math.round(volume * 100));
+      slider.oninput = () => { volume = Number(slider.value) / 100; localStorage.setItem('padVolume', String(volume)); if (!soundOn && volume > 0) { soundOn = true; localStorage.setItem('padSound', 'on'); render(); } applyVolume(); };
+      m.append(row);
+    },
+    viewMenu: async () => {
+      const m = el.viewMenu; m.innerHTML = ''; m.append(head('查看摄像头'));
+      try {
+        const resp = await fetch(base + '/v1/cameras', { headers: headers() });
+        const cams = resp.ok ? await resp.json() : [];
+        if (!cams.length) m.append(empty('没有配置摄像头'));
+        for (const c of cams) m.append(opt(c.station_id + (c.reachable ? '' : '（离线）'), false, () => startMonitor(c.station_id), !c.reachable));
+      } catch (e) { m.append(empty('加载失败')); }
+    },
+  };
+  document.querySelectorAll('[data-menu]').forEach((b) => {
+    b.addEventListener('click', async (e) => {
+      e.stopPropagation(); if (b.disabled) return;
+      const m = $(b.dataset.menu); if (openMenuEl === m) { closeMenus(); return; }
+      await builders[b.dataset.menu](); openMenu(m);
+    });
+  });
+
+  // ---------- Speaker: master gain + ringtone ----------
+  let audioCtx = null, audioGain = null, ringTimer = null;
+  let soundOn = localStorage.getItem('padSound') !== 'off';
+  let volume = Number(localStorage.getItem('padVolume')); if (!(volume >= 0 && volume <= 1)) volume = 1;
+  function ctx() {
+    if (!audioCtx) { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); audioGain = audioCtx.createGain(); audioGain.connect(audioCtx.destination); applyVolume(); }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    return audioCtx;
+  }
+  function applyVolume() { if (audioGain) audioGain.gain.value = soundOn ? volume : 0; }
   function beep(freq, at, dur) {
     const c = ctx(); const o = c.createOscillator(); const g = c.createGain();
     o.type = 'sine'; o.frequency.value = freq; g.gain.value = 0.0001;
     g.gain.setValueAtTime(0.0001, at); g.gain.exponentialRampToValueAtTime(0.2, at + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, at + dur);
-    o.connect(g).connect(c.destination); o.start(at); o.stop(at + dur + 0.05);
+    o.connect(g).connect(audioGain); o.start(at); o.stop(at + dur + 0.05);
   }
   function startRing() {
     if (ringTimer || !soundOn) return;
@@ -253,23 +464,24 @@
     play(); ringTimer = setInterval(play, 1600);
   }
   function stopRing() { clearInterval(ringTimer); ringTimer = null; }
-  $('soundBtn').onclick = () => { soundOn = !soundOn; localStorage.setItem('padSound', soundOn ? 'on' : 'off'); el.soundWave.style.display = soundOn ? '' : 'none'; if (audioGain) audioGain.gain.value = soundOn ? 1 : 0; toast(soundOn ? '喇叭已开启' : '喇叭已静音'); if (!soundOn) stopRing(); else ctx(); };
-  el.soundWave.style.display = soundOn ? '' : 'none';
+  el.spk.onclick = () => {
+    soundOn = !soundOn; localStorage.setItem('padSound', soundOn ? 'on' : 'off'); applyVolume(); render();
+    if (!soundOn) stopRing(); else { ctx(); if (ringing()) startRing(); }
+  };
   document.addEventListener('pointerdown', () => { if (soundOn) ctx(); }, { once: true });
 
-  // ---------- Door media: MJPEG picture + PCM audio ----------
-  let audioAbort = null, mediaLive = false;
+  // ---------- Stage: placeholder, MJPEG picture + PCM audio ----------
   const NO_VIDEO = 'data:image/svg+xml,' + encodeURIComponent(
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 240">' +
-    '<rect width="320" height="240" fill="#0b0d11"/>' +
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200">' +
+    '<rect width="320" height="200" fill="#0b0d11"/>' +
     '<g fill="none" stroke="#4b5160" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">' +
-    '<rect x="112" y="98" width="92" height="58" rx="10"/><path d="M204 118l30-16v44l-30-16z"/></g>' +
-    '<line x1="98" y1="74" x2="222" y2="178" stroke="#4b5160" stroke-width="6" stroke-linecap="round"/>' +
-    '<text x="160" y="196" fill="#6b7280" font-family="sans-serif" font-size="16" text-anchor="middle">\u65e0\u753b\u9762</text>' +
+    '<rect x="112" y="78" width="92" height="58" rx="10"/><path d="M204 98l30-16v44l-30-16z"/></g>' +
+    '<line x1="98" y1="54" x2="222" y2="158" stroke="#4b5160" stroke-width="6" stroke-linecap="round"/>' +
+    '<text x="160" y="180" fill="#6b7280" font-family="sans-serif" font-size="15" text-anchor="middle">无画面</text>' +
     '</svg>');
   function showPlaceholder() { el.video.src = NO_VIDEO; }
-  // A broken snapshot/stream (no frame yet) falls back to the placeholder.
   el.video.addEventListener('error', () => { if (!el.video.src.startsWith('data:')) showPlaceholder(); });
+  let audioAbort = null, mediaLive = false;
   async function startMedia() {
     if (mediaLive) return; mediaLive = true;
     el.video.src = withToken('/v1/stream.mjpeg?t=' + Date.now());
@@ -285,27 +497,29 @@
         const view = new DataView(bytes.buffer, bytes.byteOffset, usable); const n = usable / 2; if (!n) continue;
         const buf = c.createBuffer(1, n, 8000); const data = buf.getChannelData(0);
         for (let i = 0; i < n; i++) data[i] = view.getInt16(i * 2, false) / 32768;
-        const src = c.createBufferSource(); src.buffer = buf; src.connect(audioGain || c.destination);
+        const src = c.createBufferSource(); src.buffer = buf; src.connect(audioGain);
         playhead = Math.max(playhead, c.currentTime + 0.08); src.start(playhead); playhead += buf.duration;
       }
     } catch (e) { /* aborted or network */ }
   }
   function stopMedia() { mediaLive = false; if (audioAbort) { audioAbort.abort(); audioAbort = null; } }
+  function rest() { stopMedia(); stopTalk(); stopCamera(); showPlaceholder(); }
 
-  // ---------- Talk-back: hold to talk over WebSocket ----------
+  // ---------- Microphone: toggle, PCM S16LE 8 kHz over WebSocket ----------
   let talk = null;
   async function startTalk() {
     if (talk) return;
-    if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { toast('需要安全环境（https 或 http://localhost）才能用摄像头/麦克风。用 SSH 转发后访问 http://localhost:8080'); return; }
-    el.talk.classList.add('active'); el.talkLabel.textContent = '说话中…';
+    if (!secure()) { toast(SECURE_MSG); return; }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
+      const audio = { echoCancellation: true, noiseSuppression: true, channelCount: 1 };
+      if (pref.mic) audio.deviceId = { exact: pref.mic };
+      const stream = await navigator.mediaDevices.getUserMedia({ audio });
       const c = ctx(); const source = c.createMediaStreamSource(stream);
       const proc = c.createScriptProcessor(4096, 1, 1);
       const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/v1/talk.ws' + (state.token ? '?token=' + encodeURIComponent(state.token) : ''));
       ws.binaryType = 'arraybuffer';
       ws.onmessage = (m) => { try { const r = JSON.parse(m.data); if (r.error) { toast('对讲被拒绝：' + r.error); stopTalk(); } } catch (e) {} };
-      ws.onclose = () => { if (talk) stopTalk(); };
+      ws.onclose = () => { if (talk && talk.ws === ws) stopTalk(); };
       const ratio = c.sampleRate / 8000; let acc = 0;
       proc.onaudioprocess = (e) => {
         if (ws.readyState !== 1) return;
@@ -318,218 +532,199 @@
         ws.send(out.buffer.slice(0, n * 2));
       };
       source.connect(proc); proc.connect(c.destination);
-      talk = { stream, source, proc, ws };
+      talk = { stream, source, proc, ws }; render();
     } catch (e) { toast('无法打开麦克风'); stopTalk(); }
   }
   function stopTalk() {
-    el.talk.classList.remove('active'); el.talkLabel.textContent = '按住说话';
     if (!talk) return; const t = talk; talk = null;
     try { t.proc.disconnect(); t.source.disconnect(); } catch (e) {}
     try { t.stream.getTracks().forEach((x) => x.stop()); } catch (e) {}
     try { t.ws.close(); } catch (e) {}
+    render();
   }
-  el.talk.addEventListener('pointerdown', (e) => { e.preventDefault(); if (!el.talk.disabled) startTalk(); });
-  ['pointerup', 'pointercancel', 'pointerleave'].forEach((ev) => el.talk.addEventListener(ev, stopTalk));
+  el.mic.onclick = () => { if (talk) { stopTalk(); logLine('麦克风已关'); } else startTalk().then(() => { if (talk) logLine('麦克风已开'); }); };
 
-  // ---------- Commands ----------
+  // ---------- Camera: browser -> JPEG -> Agent, live-tunable geometry ----------
+  let camera = null;
+  async function startCamera() {
+    if (camera) return;
+    if (!secure()) { toast(SECURE_MSG); return; }
+    const [w, h] = effRes().split('x').map(Number), fps = effFps();
+    try {
+      const video = { width: { ideal: w }, height: { ideal: h } };
+      if (pref.cam) video.deviceId = { exact: pref.cam };
+      const stream = await navigator.mediaDevices.getUserMedia({ video });
+      const v = document.createElement('video'); v.srcObject = stream; v.muted = true; v.playsInline = true; await v.play();
+      const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
+      const g2 = canvas.getContext('2d');
+      const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/v1/talk-video.ws' + (state.token ? '?token=' + encodeURIComponent(state.token) : ''));
+      ws.binaryType = 'arraybuffer';
+      camera = { stream, video: v, canvas, g2, ws, timer: null, busy: false, periodMs: 1000 / fps };
+      el.pip.replaceChildren(v);
+      const tick = () => {
+        if (!camera || camera.ws !== ws) return;
+        if (!camera.busy && ws.readyState === 1) {
+          camera.busy = true;
+          camera.g2.drawImage(camera.video, 0, 0, camera.canvas.width, camera.canvas.height);
+          camera.canvas.toBlob((b) => {
+            if (b && camera && ws.readyState === 1) b.arrayBuffer().then((buf) => { try { ws.send(buf); } catch (e) {} if (camera) camera.busy = false; });
+            else if (camera) camera.busy = false;
+          }, 'image/jpeg', 0.5);
+        }
+        if (camera && camera.ws === ws) camera.timer = setTimeout(tick, camera.periodMs);
+      };
+      ws.onopen = tick;
+      ws.onclose = () => { if (camera && camera.ws === ws) stopCamera(); };
+      logLine('摄像头已开 ' + w + '×' + h + ' @' + fps + 'fps'); render();
+    } catch (e) { toast('无法打开摄像头：' + (e && e.name || e)); }
+  }
+  function stopCamera() {
+    if (!camera) return; const c = camera; camera = null;
+    clearTimeout(c.timer);
+    try { c.ws.close(); } catch (e) {}
+    try { c.stream.getTracks().forEach((t) => t.stop()); } catch (e) {}
+    el.pip.replaceChildren(); render();
+  }
+  function applyCameraPrefs() {
+    if (!camera) return;
+    camera.periodMs = 1000 / effFps();
+    const [w, h] = effRes().split('x').map(Number);
+    camera.canvas.width = w; camera.canvas.height = h;
+    const track = camera.stream.getVideoTracks()[0];
+    if (track) track.applyConstraints({ width: { ideal: w }, height: { ideal: h } }).catch(() => {});
+  }
+  el.cam.onclick = () => { if (camera) { stopCamera(); logLine('摄像头已关'); } else startCamera(); };
+
+  // ---------- Door call commands ----------
   let counter = 0;
+  const cmdId = () => 'pad-' + Date.now() + '-' + (++counter);
   async function command(action) {
-    const id = 'pad-' + Date.now() + '-' + (++counter);
-    const resp = await fetch(base + '/v1/call/' + action, { method: 'POST', headers: Object.assign(headers(), { 'Content-Type': 'application/json' }), body: JSON.stringify({ command_id: id }) });
+    const resp = await fetch(base + '/v1/call/' + action, { method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ command_id: cmdId() }) });
     const result = await resp.json().catch(() => ({}));
     if (resp.status === 401) { openSettings('令牌无效'); throw new Error('unauthorized'); }
     if (!result.ok) { toast({ claim: '接听', unlock: '开锁', hangup: '挂断' }[action] + '失败：' + (result.error || resp.status)); throw new Error(result.error || resp.status); }
     return result;
   }
-  el.answer.onclick = async () => { try { await command('claim'); logLine('已接听'); } catch (e) {} };
-  el.hangup.onclick = async () => { try { await command('hangup'); logLine('已挂断'); } catch (e) {} };
-  el.unlock.onclick = async () => { try { await command('unlock'); toast('已开锁'); logLine('已开锁'); } catch (e) {} };
+  el.answer.onclick = async () => { try { await command('claim'); logLine('已接听'); startTalk(); } catch (e) {} };
+  const doHangup = async () => { try { await command('hangup'); logLine('已挂断'); } catch (e) {} };
+  el.hangup.onclick = doHangup; el.reject.onclick = doHangup;
+  const doUnlock = async () => { try { await command('unlock'); toast('已开锁'); logLine('已开锁'); } catch (e) {} };
+  el.unlock.onclick = doUnlock; el.unlockRing.onclick = doUnlock; el.unlockIdle.onclick = doUnlock;
 
   // ---------- Elevator ----------
   el.elevator.onclick = async () => {
-    const id = 'pad-' + Date.now() + '-' + (++counter);
     try {
-      const resp = await fetch(base + '/v1/elevator', { method: 'POST', headers: Object.assign(headers(), { 'Content-Type': 'application/json' }), body: JSON.stringify({ command_id: id }) });
+      const resp = await fetch(base + '/v1/elevator', { method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ command_id: cmdId() }) });
       if (resp.status === 401) { openSettings('令牌无效'); return; }
       const r = await resp.json().catch(() => ({}));
-      if (r.ok) { toast('已呼叫电梯'); logLine('已呼叫电梯到本层'); }
-      else { toast('呼叫电梯失败：' + (r.error || resp.status)); }
+      if (r.ok) { toast('已呼叫电梯'); logLine('已呼叫电梯到本层'); } else toast('呼叫电梯失败：' + (r.error || resp.status));
     } catch (e) { toast('呼叫电梯失败'); }
   };
 
-  // ---------- Monitor (view a door camera without a ring) ----------
-  async function loadCameras() {
+  // ---------- Monitor (one-way view of a door camera) ----------
+  async function startMonitor(camera_id) {
     try {
-      const resp = await fetch(base + '/v1/cameras', { headers: headers() });
-      if (!resp.ok) return;
-      const cams = await resp.json();
-      const sel = el.cameraSelect; const prev = sel.value;
-      sel.innerHTML = '<option value="">摄像头…</option>';
-      for (const c of cams) {
-        const o = document.createElement('option');
-        o.value = c.station_id; o.textContent = c.station_id + (c.reachable ? '' : '（离线）'); o.disabled = !c.reachable;
-        sel.appendChild(o);
-      }
-      sel.value = prev; render();
-    } catch (e) {}
-  }
-  el.cameraSelect.onchange = render;
-  el.view.onclick = async () => {
-    const camera_id = el.cameraSelect.value; if (!camera_id) return;
-    try {
-      const resp = await fetch(base + '/v1/monitor', { method: 'POST', headers: Object.assign(headers(), { 'Content-Type': 'application/json' }), body: JSON.stringify({ camera_id }) });
+      const resp = await fetch(base + '/v1/monitor', { method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ camera_id }) });
       if (resp.status === 401) { openSettings('令牌无效'); return; }
       if (resp.ok) { state.monitoring = camera_id; render(); startMedia(); logLine('查看摄像头 ' + camera_id); }
       else { const r = await resp.json().catch(() => ({})); toast('查看失败：' + (r.error || resp.status)); }
     } catch (e) { toast('查看失败'); }
-  };
+  }
   el.viewStop.onclick = async () => {
     try { await fetch(base + '/v1/monitor/stop', { method: 'POST', headers: headers() }); } catch (e) {}
-    state.monitoring = null; render(); stopMedia(); showPlaceholder(); logLine('停止查看');
+    state.monitoring = null; rest(); render(); logLine('停止查看');
   };
 
-  // ---------- Outbound call (dial) ----------
-  // Send our camera to the far end during a call (browser -> JPEG -> Agent).
-  let camera = null;
-  function camGeom() { const [w, h] = el.camRes.value.split('x').map(Number); return { w, h, fps: Number(el.camFps.value) }; }
-  async function startCamera() {
-    if (camera) return;
-    if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      toast('需要安全环境（https 或 http://localhost）才能用摄像头/麦克风。用 SSH 转发后访问 http://localhost:8080'); return;
-    }
-    const g = camGeom();
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: g.w }, height: { ideal: g.h } } });
-      const video = document.createElement('video'); video.srcObject = stream; video.muted = true; await video.play();
-      const canvas = document.createElement('canvas'); canvas.width = g.w; canvas.height = g.h;
-      const g2 = canvas.getContext('2d');
-      const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/v1/talk-video.ws' + (state.token ? '?token=' + encodeURIComponent(state.token) : ''));
-      ws.binaryType = 'arraybuffer';
-      camera = { stream, video, canvas, g2, ws, timer: null, busy: false, periodMs: 1000 / g.fps };
-      const tick = () => {
-        if (!camera) return;
-        if (!camera.busy && ws.readyState === 1) {
-          camera.busy = true;
-          camera.g2.drawImage(camera.video, 0, 0, camera.canvas.width, camera.canvas.height);
-          camera.canvas.toBlob((b) => {
-            if (b && camera && ws.readyState === 1) b.arrayBuffer().then((buf) => { try { ws.send(buf); } catch (e) {} camera.busy = false; });
-            else if (camera) camera.busy = false;
-          }, 'image/jpeg', 0.5);
-        }
-        if (camera) camera.timer = setTimeout(tick, camera.periodMs);
-      };
-      ws.onopen = () => { tick(); };
-      ws.onclose = () => stopCamera();
-      logLine('已开启本机摄像头 ' + g.w + '×' + g.h + ' @' + g.fps + 'fps');
-    } catch (e) { toast('无法打开摄像头：' + (e && e.name || e)); }
-  }
-  function stopCamera() {
-    if (!camera) return;
-    clearTimeout(camera.timer);
-    try { camera.ws.close(); } catch (e) {}
-    try { camera.stream.getTracks().forEach((t) => t.stop()); } catch (e) {}
-    camera = null;
-  }
-  // Live tuning during a call: FPS is free; resolution re-sizes the encode
-  // canvas (and best-effort re-requests the source) without restarting video.
-  el.camFps.onchange = () => { if (camera) { camera.periodMs = 1000 / Number(el.camFps.value); logLine('帧率 → ' + el.camFps.value + 'fps'); } };
-  el.camRes.onchange = () => {
-    const [w, h] = el.camRes.value.split('x').map(Number);
-    if (!camera) return;
-    camera.canvas.width = w; camera.canvas.height = h;
-    const track = camera.stream.getVideoTracks()[0];
-    if (track) track.applyConstraints({ width: { ideal: w }, height: { ideal: h } }).catch(() => {});
-    logLine('分辨率 → ' + w + '×' + h);
-  };
-  el.dialInput.oninput = render;
-  // Dialing is room-to-room only (S). Compose the full station id from a short
-  // number using our own id's pattern (S00000000000 + "3003" -> S00000030030);
-  // a value already starting with a letter passes through.
+  // ---------- Dial sheet (room-to-room) ----------
+  // Compose a full station id from a short number using our own id's pattern
+  // (S00000000000 + "3003" -> S00000030030); a value with a letter passes through.
   function fullStationId(value) {
     if (/^[A-Za-z]/.test(value)) return value;
     const local = state.deviceId || 'S00000000000';
     if (local.length <= value.length + 1) return 'S' + value;
     return 'S' + local.slice(1, local.length - 1 - value.length) + value + local.slice(-1);
   }
-  el.dial.onclick = async () => {
+  const recent = () => { try { return JSON.parse(localStorage.getItem('padRecent') || '[]'); } catch (e) { return []; } };
+  function remember(v) { const list = [v, ...recent().filter((x) => x !== v)].slice(0, 6); localStorage.setItem('padRecent', JSON.stringify(list)); }
+  function renderDial() {
+    const v = el.dialInput.value.trim();
+    el.dialGo.disabled = !v;
+    el.dialPreview.textContent = v ? '呼叫 ' + fullStationId(v) : '输入短号，如 3003';
+    el.recent.replaceChildren(...recent().map((n) => { const c = document.createElement('button'); c.type = 'button'; c.className = 'chip'; c.textContent = n; c.onclick = () => { el.dialInput.value = n; renderDial(); el.dialInput.focus(); }; return c; }));
+  }
+  el.dial.onclick = () => { el.dialInput.value = ''; renderDial(); el.dialSheet.showModal(); setTimeout(() => el.dialInput.focus(), 50); };
+  el.dialCancel.onclick = () => el.dialSheet.close();
+  el.dialInput.oninput = renderDial;
+  el.dialInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !el.dialGo.disabled) { e.preventDefault(); el.dialGo.click(); } });
+  el.dialGo.onclick = async () => {
     const value = el.dialInput.value.trim(); if (!value) return;
     const id = fullStationId(value);
     try {
-      const resp = await fetch(base + '/v1/dial', { method: 'POST', headers: Object.assign(headers(), { 'Content-Type': 'application/json' }), body: JSON.stringify({ callee_id: id }) });
-      if (resp.status === 401) { openSettings('令牌无效'); return; }
-      if (resp.ok) { state.calling = id; render(); startMedia(); startTalk(); logLine('拨号 ' + id); }
+      const resp = await fetch(base + '/v1/dial', { method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ callee_id: id }) });
+      if (resp.status === 401) { el.dialSheet.close(); openSettings('令牌无效'); return; }
+      if (resp.ok) { remember(value); el.dialSheet.close(); state.calling = id; state.callLabel = value; state.connected = false; render(); startMedia(); startTalk(); logLine('拨号 ' + id); }
       else { const r = await resp.json().catch(() => ({})); toast('拨号失败：' + (r.error || resp.status)); }
     } catch (e) { toast('拨号失败'); }
   };
   el.dialHangup.onclick = async () => {
     try { await fetch(base + '/v1/dial/hangup', { method: 'POST', headers: headers() }); } catch (e) {}
-    state.calling = null; render(); stopMedia(); stopTalk(); stopCamera(); showPlaceholder(); logLine('挂断通话');
+    state.calling = null; state.callLabel = ''; state.connected = false; rest(); render(); logLine('挂断通话');
   };
-  el.cam.onclick = async () => { if (camera) { stopCamera(); logLine('已关摄像头'); } else { await startCamera(); } render(); };
 
   // ---------- Events (SSE) ----------
   let source = null;
   function applyState(s) {
-    state.phase = s.phase; state.owner = s.owner; state.online = true; render();
-    if (s.phase === 'idle') { stopRing(); stopMedia(); showPlaceholder(); } else { startMedia(); if (s.phase === 'ringing') startRing(); else stopRing(); }
+    state.phase = s.phase; state.owner = s.owner; state.online = true;
+    if (s.phase !== 'idle' && s.door_id) state.peer = s.door_id;
+    if (s.phase === 'idle') { stopRing(); if (!state.calling && !state.monitoring) { stopMedia(); showPlaceholder(); } }
+    else { startMedia(); if (s.phase === 'ringing') startRing(); else stopRing(); }
+    render();
   }
   function connectEvents() {
     if (source) source.close();
     source = new EventSource(withToken('/v1/events'));
-    source.onopen = () => { state.online = true; render(); loadCameras(); };
+    source.onopen = () => { state.online = true; render(); };
     source.onerror = () => { state.online = false; render(); };
-    source.addEventListener('snapshot', (e) => { const ev = JSON.parse(e.data); applyState(ev.state); });
-    source.addEventListener('call_started', (e) => { const ev = JSON.parse(e.data); logLine('门口 ' + ev.door_id + ' 呼叫'); state.phase = 'ringing'; state.owner = 'none'; state.online = true; render(); startMedia(); startRing(); });
-    source.addEventListener('pad_answered', () => { logLine('室内机已接听'); state.phase = 'connected'; state.owner = 'pad'; render(); stopRing(); });
-    source.addEventListener('remote_answered', () => { state.phase = 'connected'; state.owner = 'remote'; render(); stopRing(); });
-    source.addEventListener('unlocked', (e) => { const ev = JSON.parse(e.data); logLine(ev.by === 'remote' ? '已开锁' : '室内机开锁'); });
-    source.addEventListener('call_ended', (e) => { const ev = JSON.parse(e.data); logLine('通话结束（' + ev.reason + '）'); state.phase = 'idle'; state.owner = 'none'; render(); stopRing(); stopMedia(); stopTalk(); showPlaceholder(); });
-    source.addEventListener('agent_error', (e) => { const ev = JSON.parse(e.data); logLine('Agent 错误：' + ev.message); });
-    source.addEventListener('monitor_started', (e) => { const ev = JSON.parse(e.data); state.monitoring = ev.camera_id; render(); startMedia(); logLine('查看 ' + ev.camera_id); });
-    source.addEventListener('monitor_stopped', (e) => { const ev = JSON.parse(e.data); if (state.monitoring) { state.monitoring = null; render(); stopMedia(); showPlaceholder(); } logLine('查看结束（' + ev.reason + '）'); });
-    source.addEventListener('elevator_called', () => logLine('电梯已呼叫'));
-    source.addEventListener('dialing', (e) => { const ev = JSON.parse(e.data); state.calling = ev.callee_id; render(); startMedia(); startTalk(); logLine('拨号 ' + ev.callee_id); });
-    source.addEventListener('call_connected', (e) => { const ev = JSON.parse(e.data); logLine('已接通 ' + ev.callee_id); });
-    source.addEventListener('call_hung_up', (e) => { const ev = JSON.parse(e.data); if (state.calling) { state.calling = null; render(); stopMedia(); stopTalk(); stopCamera(); showPlaceholder(); } logLine('通话结束（' + ev.reason + '）'); });
+    const on = (name, fn) => source.addEventListener(name, (e) => fn(e.data ? JSON.parse(e.data) : {}));
+    on('snapshot', (ev) => applyState(ev.state));
+    on('call_started', (ev) => { logLine('门口 ' + ev.door_id + ' 呼叫'); state.peer = ev.door_id || ''; state.phase = 'ringing'; state.owner = 'none'; state.online = true; render(); startMedia(); startRing(); });
+    on('pad_answered', () => { logLine('室内机已接听'); state.phase = 'connected'; state.owner = 'pad'; render(); stopRing(); });
+    on('remote_answered', () => { state.phase = 'connected'; state.owner = 'remote'; render(); stopRing(); });
+    on('unlocked', (ev) => logLine(ev.by === 'remote' ? '已开锁' : '室内机开锁'));
+    on('call_ended', (ev) => { logLine('通话结束（' + ev.reason + '）'); state.phase = 'idle'; state.owner = 'none'; state.peer = ''; stopRing(); rest(); render(); });
+    on('agent_error', (ev) => logLine('Agent 错误：' + ev.message));
+    on('monitor_started', (ev) => { state.monitoring = ev.camera_id; render(); startMedia(); logLine('查看 ' + ev.camera_id); });
+    on('monitor_stopped', (ev) => { if (state.monitoring) { state.monitoring = null; rest(); render(); } logLine('查看结束（' + ev.reason + '）'); });
+    on('elevator_called', () => logLine('电梯已呼叫'));
+    on('dialing', (ev) => { if (state.calling !== ev.callee_id) { state.calling = ev.callee_id; state.callLabel = ''; state.connected = false; render(); startMedia(); startTalk(); logLine('拨号 ' + ev.callee_id); } });
+    on('call_connected', (ev) => { state.connected = true; render(); logLine('已接通 ' + ev.callee_id); });
+    on('call_hung_up', (ev) => { if (state.calling) { state.calling = null; state.callLabel = ''; state.connected = false; rest(); render(); } logLine('通话结束（' + ev.reason + '）'); });
   }
   async function probe() {
     try {
       const resp = await fetch(base + '/v1/state', { headers: headers() });
       if (resp.status === 401) { openSettings('需要访问令牌'); return false; }
-      const s = await resp.json(); applyState(s); if (s.room_id) state.deviceId = s.room_id; $('title').textContent = s.room_id ? '门口机 · ' + s.room_id : '门口机';
+      const s = await resp.json(); if (s.room_id) state.deviceId = s.room_id;
+      el.title.textContent = s.room_id ? '门口机 · ' + s.room_id : '门口机';
+      applyState(s);
       return true;
     } catch (e) { state.online = false; render(); return false; }
   }
 
   // ---------- Settings ----------
-  function openSettings(hint) { el.tokenInput.value = state.token; $('apiHint').textContent = hint || ('Agent: ' + base); el.settings.showModal(); }
+  function openSettings(hint) { el.tokenInput.value = state.token; el.apiHint.textContent = hint || ('Agent: ' + base); el.settings.showModal(); }
   $('settingsBtn').onclick = () => openSettings();
   $('settingsCancel').onclick = () => el.settings.close();
   $('settingsSave').onclick = async () => { state.token = el.tokenInput.value.trim(); localStorage.setItem('padToken', state.token); el.settings.close(); if (await probe()) connectEvents(); };
 
-  // ---------- Snapshot age ----------
-  el.video.addEventListener('load', () => { el.age.textContent = ''; });
-  el.age.textContent = '';
-
-  // Camera resolutions come from the server config (device-dependent).
-  function fillSelect(sel, list, def, label) {
-    if (!Array.isArray(list) || !list.length) return;
-    const prev = sel.value;
-    sel.innerHTML = '';
-    for (const v of list) {
-      const o = document.createElement('option');
-      o.value = String(v); o.textContent = label(v); sel.append(o);
-    }
-    const want = list.includes(prev) ? prev : (list.includes(def) ? def : list[0]);
-    sel.value = String(want);
-  }
+  // ---------- Server-provided UI config ----------
   async function loadUiConfig() {
     try {
       const r = await fetch(base + '/v1/ui-config', { headers: { 'Accept': 'application/json' } });
       if (!r.ok) return;
       const c = await r.json();
-      fillSelect(el.camRes, c.camera_resolutions, c.camera_resolution_default, (v) => String(v).replace('x', '×'));
-      fillSelect(el.camFps, c.camera_fps, c.camera_fps_default, (v) => v + ' fps');
+      if (Array.isArray(c.camera_resolutions) && c.camera_resolutions.length) { ui.res = c.camera_resolutions.map(String); ui.resDef = String(c.camera_resolution_default || ''); }
+      if (Array.isArray(c.camera_fps) && c.camera_fps.length) { ui.fps = c.camera_fps.map(Number); ui.fpsDef = Number(c.camera_fps_default) || ui.fps[0]; }
     } catch (e) {}
   }
 
