@@ -189,6 +189,35 @@ impl<'a> Message<'a> {
     }
 }
 
+/// Log one PENGUIN0 control packet as hex at TRACE level. The data plane
+/// (media, opcode `0x0a`) is skipped so `RUST_LOG=trace` stays readable; the
+/// check is cheap so this is a no-op below TRACE. `dir` is a short label such
+/// as "tx door" or "rx".
+pub fn trace_packet(dir: &str, raw: &[u8]) {
+    if !tracing::enabled!(tracing::Level::TRACE) {
+        return;
+    }
+    // Cheap data-plane skip without a full parse.
+    if raw.len() >= 14 && &raw[..8] == MAGIC {
+        let opcode = u32::from_le_bytes([raw[10], raw[11], raw[12], raw[13]]);
+        if opcode == OP_MEDIA {
+            return;
+        }
+        let family = u16::from_le_bytes([raw[8], raw[9]]);
+        tracing::trace!(
+            dir,
+            family = format_args!("{family:#06x}"),
+            opcode = format_args!("{opcode:#04x}"),
+            len = raw.len(),
+            hex = hex::encode(raw),
+            "penguin"
+        );
+    } else {
+        // Non-PENGUIN0 control (e.g. UDP 10008 discovery).
+        tracing::trace!(dir, len = raw.len(), hex = hex::encode(raw), "raw");
+    }
+}
+
 pub fn packet(family: u16, opcode: u32, declared: u32, body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(32 + body.len());
     out.extend_from_slice(MAGIC);

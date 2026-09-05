@@ -313,6 +313,7 @@ impl Agent {
         let Ok(request) = monitor_request(&us, door) else {
             return "build_error".into();
         };
+        crate::protocol::trace_packet("tx monitor", &request);
         let _ = socket.send(&request).await;
         let mut jpeg = JpegReassembler::default();
         let mut buf = vec![0_u8; 65_536];
@@ -321,16 +322,21 @@ impl Agent {
             tokio::select! {
                 changed = cancel.changed() => {
                     if changed.is_err() || *cancel.borrow() {
-                        let _ = socket.send(&packet(FAMILY_MONITOR, OP_HANGUP, 80, &block)).await;
+                        let bye = packet(FAMILY_MONITOR, OP_HANGUP, 80, &block);
+                        crate::protocol::trace_packet("tx monitor", &bye);
+                        let _ = socket.send(&bye).await;
                         return "stopped".into();
                     }
                 }
                 _ = keepalive.tick() => {
-                    let _ = socket.send(&packet(FAMILY_MONITOR, OP_KEEPALIVE, 80, &block)).await;
+                    let ka = packet(FAMILY_MONITOR, OP_KEEPALIVE, 80, &block);
+                    crate::protocol::trace_packet("tx monitor", &ka);
+                    let _ = socket.send(&ka).await;
                 }
                 recv = socket.recv(&mut buf) => {
                     let Ok(size) = recv else { return "recv_error".into() };
                     for raw in split_coalesced(&buf[..size]) {
+                        crate::protocol::trace_packet("rx monitor", raw);
                         let Ok(msg) = Message::parse(raw) else { continue };
                         if msg.family != FAMILY_MONITOR { continue; }
                         if msg.opcode == OP_HANGUP {

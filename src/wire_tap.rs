@@ -78,6 +78,7 @@ impl TapWire {
             // The door's discovery exchange: learn both stations passively.
             if udp.destination_port == self.discovery_port || udp.source_port == self.discovery_port
             {
+                crate::protocol::trace_packet("rx discovery", udp.payload);
                 if discovery_request_room(udp.payload).as_deref() == Some(device_id.as_str()) {
                     if agent.learn_address(Side::Door, udp.source_ip) {
                         agent.pin_mac(Side::Door, udp.source_mac);
@@ -93,6 +94,7 @@ impl TapWire {
                 continue;
             }
             for raw in split_coalesced(udp.payload) {
+                crate::protocol::trace_packet("rx bridge", raw);
                 let Ok(message) = Message::parse(raw) else {
                     continue;
                 };
@@ -129,6 +131,7 @@ impl TapWire {
         port: u16,
         payload: &[u8],
     ) -> Result<()> {
+        crate::protocol::trace_packet("tx inject", payload);
         let frame = build_udp_ipv4(src_mac, dst_mac, src_ip, dst_ip, port, port, payload, self.next_seq())?;
         let sent = self.socket.send(&frame)?;
         anyhow::ensure!(sent == frame.len(), "short AF_PACKET send");

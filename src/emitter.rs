@@ -172,6 +172,7 @@ pub async fn resolve_pad(
         .context("enabling UDP broadcast")?;
     let request = discovery_request(room_id)?;
     let dest = SocketAddr::new(broadcast.into(), DISCOVERY_PORT);
+    crate::protocol::trace_packet("tx discovery", &request);
     socket
         .send_to(&request, dest)
         .await
@@ -187,6 +188,7 @@ pub async fn resolve_pad(
             Err(_) => anyhow::bail!("no discovery reply for {room_id} within {timeout:?}"),
         };
         // Re-send the request periodically? One shot is enough on a LAN.
+        crate::protocol::trace_packet("rx discovery", &buf[..size]);
         if let Some(reply_room) = discovery_reply_room(&buf[..size]) {
             if reply_room == room_id {
                 if let std::net::IpAddr::V4(ip) = from.ip() {
@@ -252,6 +254,7 @@ pub async fn run_emulator(
             };
             let mut hung_up = false;
             for raw in split_coalesced(&buf[..size]) {
+                crate::protocol::trace_packet("rx pad", raw);
                 if let Some(line) = observe_reply(raw, &mut recv_obs.lock().unwrap(), &mut speaker)
                 {
                     tracing::info!("{line}");
@@ -274,18 +277,21 @@ pub async fn run_emulator(
     //  3. 00b7/01 session request x3 (the media session; the Pad replies 00b7/03).
     // Only after this does the Pad actually ring, so a person can answer.
     for _ in 0..10 {
-        let _ = socket.send(&crate::protocol::page_request()).await;
+        let page = crate::protocol::page_request();
+        crate::protocol::trace_packet("tx door", &page);
+        let _ = socket.send(&page).await;
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let _ = socket.send(&crate::protocol::bootstrap_request()).await;
+    let boot = crate::protocol::bootstrap_request();
+    crate::protocol::trace_packet("tx door", &boot);
+    let _ = socket.send(&boot).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Ring, then stream media and keepalives until stopped.
+    let ring = crate::protocol::session_request(&endpoints)?;
     for _ in 0..3 {
-        socket
-            .send(&crate::protocol::session_request(&endpoints)?)
-            .await
-            .context("sending session request")?;
+        crate::protocol::trace_packet("tx door", &ring);
+        socket.send(&ring).await.context("sending session request")?;
     }
     let frame_gap = Duration::from_micros(1_000_000 / fps.max(1) as u64);
     let mut frame_at = tokio::time::interval(frame_gap);
@@ -338,6 +344,7 @@ pub async fn run_emulator(
             }
             _ = keepalive_at.tick() => {
                 if let Ok(p) = session_control(OP_KEEPALIVE, &endpoints) {
+                    crate::protocol::trace_packet("tx door", &p);
                     let _ = socket.send(&p).await;
                 }
             }
@@ -416,6 +423,7 @@ pub async fn run_monitor(
                 break;
             };
             for raw in split_coalesced(&buf[..size]) {
+                crate::protocol::trace_packet("rx monitor", raw);
                 let Ok(msg) = Message::parse(raw) else { continue };
                 if msg.family != FAMILY_MONITOR {
                     continue;
@@ -464,10 +472,9 @@ pub async fn run_monitor(
         }
     });
 
-    socket
-        .send(&monitor_request(&us, &target)?)
-        .await
-        .context("sending monitor request")?;
+    let req = monitor_request(&us, &target)?;
+    crate::protocol::trace_packet("tx monitor", &req);
+    socket.send(&req).await.context("sending monitor request")?;
 
     let mut keepalive = tokio::time::interval(Duration::from_secs(1));
     let deadline = duration.map(|d| tokio::time::Instant::now() + d);
@@ -482,13 +489,17 @@ pub async fn run_monitor(
         }
         tokio::select! {
             _ = keepalive.tick() => {
-                let _ = socket.send(&packet(FAMILY_MONITOR, OP_KEEPALIVE, 80, &block)).await;
+                let p = packet(FAMILY_MONITOR, OP_KEEPALIVE, 80, &block);
+                crate::protocol::trace_packet("tx monitor", &p);
+                let _ = socket.send(&p).await;
             }
             _ = stop_rx.changed() => {}
         }
     }
     // Stop viewing.
-    let _ = socket.send(&packet(FAMILY_MONITOR, OP_HANGUP, 80, &block)).await;
+    let bye = packet(FAMILY_MONITOR, OP_HANGUP, 80, &block);
+    crate::protocol::trace_packet("tx monitor", &bye);
+    let _ = socket.send(&bye).await;
     receiver.abort();
     let observation = obs.lock().unwrap().clone();
     Ok(observation)
@@ -513,16 +524,16 @@ pub async fn request_elevator(
         .connect(target)
         .await
         .with_context(|| format!("connecting to {target}"))?;
-    socket
-        .send(&elevator_request(room_id)?)
-        .await
-        .context("sending elevator call")?;
+    let req = elevator_request(room_id)?;
+    crate::protocol::trace_packet("tx elevator", &req);
+    socket.send(&req).await.context("sending elevator call")?;
     tracing::info!(%target, %bind, room_id, "elevator: call sent (0106/01)");
     let mut buf = vec![0_u8; 1024];
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         match tokio::time::timeout_at(deadline, socket.recv(&mut buf)).await {
             Ok(Ok(size)) => {
+                crate::protocol::trace_packet("rx elevator", &buf[..size]);
                 if let Ok(msg) = Message::parse(&buf[..size]) {
                     if msg.family == FAMILY_ELEVATOR && msg.opcode != OP_REQUEST {
                         tracing::info!("elevator acknowledged (0106/02)");

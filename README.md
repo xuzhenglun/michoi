@@ -296,6 +296,18 @@ Agent accepts packets only when configured source MAC, IP, station IDs and
 endpoint IPs all match. A real unlock is rejected unless the remote owner won
 the current call.
 
+## Debug logging
+
+`RUST_LOG` sets verbosity (via `tracing`/`EnvFilter`). At `trace` every
+control packet is logged as hex on send and receive, across the tools and
+both Agent wires; the data plane (media, opcode `0x0a`) is excluded so the
+trace stays readable. Discovery (UDP 10008) is included.
+
+```sh
+RUST_LOG=trace michoi tools elevator M00000000000 --broadcast 192.168.124.255
+RUST_LOG=michoi=trace michoi agent config.toml   # crate-scoped
+```
+
 ## Legacy Python tools
 
 The original dependency-free analyzer remains under `pad_intercom/`:

@@ -48,6 +48,7 @@ impl UdpWire {
                 agent.learn_address(Side::Door, door_ip);
             }
             for raw in split_coalesced(&buffer[..size]) {
+                crate::protocol::trace_packet("rx door", raw);
                 agent.on_wire(Side::Door, raw);
             }
         }
@@ -59,6 +60,7 @@ impl UdpWire {
             .lock()
             .unwrap()
             .context("no door station has contacted this Pad yet")?;
+        crate::protocol::trace_packet("tx pad", payload);
         self.socket
             .try_send_to(payload, peer)
             .map(|_| ())
@@ -114,7 +116,9 @@ pub async fn discovery_responder(port: u16, device_id: String) {
         let Ok((size, from)) = socket.recv_from(&mut buffer).await else {
             break;
         };
+        crate::protocol::trace_packet("rx discovery", &buffer[..size]);
         if discovery_request_room(&buffer[..size]).as_deref() == Some(device_id.as_str()) {
+            crate::protocol::trace_packet("tx discovery", &reply);
             let _ = socket.send_to(&reply, from).await;
         }
     }
