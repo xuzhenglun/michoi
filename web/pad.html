@@ -45,6 +45,8 @@
   main { flex: 1; display: flex; flex-direction: column; gap: 14px; padding: 0 18px 12px; max-width: 1000px; width: 100%; margin: 0 auto; }
   .stage { position: relative; background: #000; border-radius: 20px; overflow: hidden; box-shadow: var(--shadow); aspect-ratio: 16 / 10; max-height: 64dvh; }
   .stage > img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .stage .idle { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: rgba(255,255,255,.34); font-size: 14px; pointer-events: none; }
+  .stage .idle svg { width: 56px; height: 56px; stroke-width: 1.5; }
   .tag { position: absolute; padding: 5px 10px; border-radius: 9px; font-size: 12px; color: #fff; background: rgba(0,0,0,.5); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
   .tag.badge { left: 14px; top: 14px; display: inline-flex; align-items: center; gap: 6px; }
   .tag.badge i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
@@ -146,6 +148,7 @@
 <main>
   <section class="stage">
     <img id="video" alt="画面">
+    <div class="idle" id="idle"><svg viewBox="0 0 24 24"><rect x="3" y="7" width="13" height="10" rx="2"/><path d="M16 10l5-3v10l-5-3z"/><path d="M3 3l18 18"/></svg><span>无画面</span></div>
     <span class="tag badge" id="badge"><i></i><span id="badgeText">离线</span></span>
     <span class="tag peer" id="peer" hidden></span>
     <div class="pip" id="pip" hidden></div>
@@ -295,7 +298,7 @@
   };
   const el = {
     title: $('title'), status: $('status'), statusText: $('statusText'), badge: $('badge'), badgeText: $('badgeText'),
-    peer: $('peer'), video: $('video'), pip: $('pip'), toast: $('toast'), log: $('log'), logToggle: $('logToggle'),
+    peer: $('peer'), video: $('video'), idle: $('idle'), pip: $('pip'), toast: $('toast'), log: $('log'), logToggle: $('logToggle'),
     micSplit: $('micSplit'), mic: $('micBtn'), camSplit: $('camSplit'), cam: $('camBtn'), spkSplit: $('spkSplit'), spk: $('spkBtn'),
     micMenu: $('micMenu'), camMenu: $('camMenu'), spkMenu: $('spkMenu'), viewMenu: $('viewMenu'),
     actIdle: $('actIdle'), actRinging: $('actRinging'), actDoor: $('actDoor'), actCalling: $('actCalling'), actMonitor: $('actMonitor'),
@@ -473,19 +476,12 @@
   document.addEventListener('pointerdown', () => { if (soundOn) ctx(); }, { once: true });
 
   // ---------- Stage: placeholder, MJPEG picture + PCM audio ----------
-  const NO_VIDEO = 'data:image/svg+xml,' + encodeURIComponent(
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200">' +
-    '<rect width="320" height="200" fill="#0b0d11"/>' +
-    '<g fill="none" stroke="#4b5160" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">' +
-    '<rect x="112" y="78" width="92" height="58" rx="10"/><path d="M204 98l30-16v44l-30-16z"/></g>' +
-    '<line x1="98" y1="54" x2="222" y2="158" stroke="#4b5160" stroke-width="6" stroke-linecap="round"/>' +
-    '<text x="160" y="180" fill="#6b7280" font-family="sans-serif" font-size="15" text-anchor="middle">无画面</text>' +
-    '</svg>');
-  function showPlaceholder() { el.video.src = NO_VIDEO; }
-  el.video.addEventListener('error', () => { if (!el.video.src.startsWith('data:')) showPlaceholder(); });
+  function showPlaceholder() { el.video.hidden = true; el.video.removeAttribute('src'); el.idle.hidden = false; }
+  el.video.addEventListener('error', () => { if (!el.video.hidden) showPlaceholder(); });
   let audioAbort = null, mediaLive = false;
   async function startMedia() {
     if (mediaLive) return; mediaLive = true;
+    el.idle.hidden = true; el.video.hidden = false;
     el.video.src = withToken('/v1/stream.mjpeg?t=' + Date.now());
     audioAbort = new AbortController();
     try {
