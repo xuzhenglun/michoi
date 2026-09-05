@@ -469,6 +469,9 @@ async fn connection<A: AgentControl + AgentMedia>(
         if request.method == "GET" && request.path == "/v1/talk.ws" {
             return talk_websocket(reader, writer, &request, agent).await;
         }
+        if request.method == "GET" && request.path == "/v1/talk-video.ws" {
+            return talk_video_websocket(reader, writer, &request, agent).await;
+        }
         let response = route(&request, &config, agent.as_ref()).await;
         let keep_alive = request.keep_alive;
         write_response(&mut writer, &response, keep_alive).await?;
@@ -519,6 +522,7 @@ async fn route<A: AgentControl + AgentMedia>(
                         "pcm".into(),
                         "talk".into(),
                         "talk-ws".into(),
+                        "talk-video-ws".into(),
                         "pad".into(),
                         "cameras".into(),
                         "monitor".into(),
@@ -565,7 +569,8 @@ async fn route<A: AgentControl + AgentMedia>(
         | ("POST", "/v1/talk")
         | ("GET", "/v1/stream.mjpeg")
         | ("GET", "/v1/audio.pcm")
-        | ("GET", "/v1/talk.ws") => {
+        | ("GET", "/v1/talk.ws")
+        | ("GET", "/v1/talk-video.ws") => {
             Response::error(500, "internal", "streaming route reached the plain router")
         }
         (_, path) if path.starts_with("/v1/") => {
@@ -1065,6 +1070,72 @@ fn base64_encode(bytes: &[u8]) -> String {
 
 /// WebSocket talk-back: binary messages carry PCM S16LE 8 kHz mono. Browsers
 /// cannot stream an HTTP request body over HTTP/1.1, so this is their path.
+/// Browser camera -> callee: each binary WebSocket message is one JPEG frame,
+/// forwarded to the far end of the active outbound call.
+async fn talk_video_websocket<A: AgentControl + AgentMedia>(
+    reader: BufReader<OwnedReadHalf>,
+    writer: OwnedWriteHalf,
+    request: &Request,
+    agent: Arc<A>,
+) -> Result<()> {
+    let mut writer = writer;
+    let key = match request.header("sec-websocket-key") {
+        Some(key)
+            if request
+                .header("upgrade")
+                .is_some_and(|u| u.eq_ignore_ascii_case("websocket")) =>
+        {
+            key.trim().to_owned()
+        }
+        _ => {
+            let response = Response::error(400, "bad_request", "WebSocket upgrade expected");
+            write_response(&mut writer, &response, false).await?;
+            return Ok(());
+        }
+    };
+    use sha1::Digest as _;
+    let accept = base64_encode(&sha1::Sha1::digest(
+        format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11").as_bytes(),
+    ));
+    let head = format!(
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+    );
+    writer.write_all(head.as_bytes()).await?;
+    writer.flush().await?;
+    let prefix = reader.buffer().to_vec();
+    let read_half = reader.into_inner();
+    let stream = read_half
+        .reunite(writer)
+        .map_err(|_| anyhow::anyhow!("reuniting TCP halves"))?;
+    let stream = PrefixedStream { prefix, inner: stream };
+    let mut socket = tokio_tungstenite::WebSocketStream::from_raw_socket(
+        stream,
+        tokio_tungstenite::tungstenite::protocol::Role::Server,
+        None,
+    )
+    .await;
+    use futures_util::{SinkExt, StreamExt};
+    let mut frames = 0_u64;
+    while let Some(message) = socket.next().await {
+        let Ok(message) = message else { break };
+        match message {
+            WsMessage::Binary(bytes) => {
+                if bytes.starts_with(&[0xff, 0xd8]) {
+                    let _ = agent.talk_video(Arc::from(bytes.to_vec())).await;
+                    frames += 1;
+                }
+            }
+            WsMessage::Ping(payload) => {
+                let _ = socket.send(WsMessage::Pong(payload)).await;
+            }
+            WsMessage::Close(_) => break,
+            _ => {}
+        }
+    }
+    tracing::info!(frames, "WebSocket talk-video closed");
+    Ok(())
+}
+
 async fn talk_websocket<A: AgentControl + AgentMedia>(
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,

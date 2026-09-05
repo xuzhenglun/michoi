@@ -341,6 +341,12 @@ pub trait AgentMedia: Send + Sync + 'static {
     fn history(&self, since_us: u64) -> MediaHistory;
     fn media_info(&self) -> MediaInfo;
     fn talk(&self, chunk: AudioChunk) -> BoxFuture<'_, Result<(), CallError>>;
+
+    /// Send one JPEG frame from our camera to the far end of an outbound call.
+    /// Default: a no-op (implementations without outbound calls ignore it).
+    fn talk_video(&self, _jpeg: Arc<[u8]>) -> BoxFuture<'_, Result<(), CallError>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// Time-bounded pre-roll buffer of door media, also capped in bytes so a

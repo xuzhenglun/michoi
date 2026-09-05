@@ -582,6 +582,20 @@ paths:
         "404":
           description: Swagger UI disabled
 
+  /v1/talk-video.ws:
+    get:
+      tags: [media]
+      summary: Send the browser camera to the far end of an outbound call
+      description: |
+        WebSocket upgrade; each binary message is one JPEG frame. During an
+        active outbound call (`POST /v1/dial`) the frames are fragmented and
+        sent to the callee as `00b7/0a` video. Ignored when no call is active.
+        Authenticate with `?token=` (WebSocket clients cannot set headers).
+      operationId: talkVideoWebSocket
+      responses:
+        "101": { description: Switching Protocols }
+        "400": { description: Not a WebSocket upgrade }
+
 components:
   securitySchemes:
     bearer:

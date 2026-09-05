@@ -35,7 +35,7 @@ use crate::agent_server::ServerConfig;
 use crate::config::{AgentMode, IntercomConfig};
 use crate::ethernet::MacAddress;
 use crate::protocol::{
-    audio_packet, bootstrap_reply, session_control, session_reply, Endpoints, JpegReassembler,
+    audio_packet, bootstrap_reply, jpeg_packets, session_control, session_reply, Endpoints, JpegReassembler,
     Message, Station, FAMILY_BOOTSTRAP, FAMILY_SESSION, MEDIA_AUDIO, OP_ANSWER,
     OP_HANGUP, OP_KEEPALIVE, OP_MEDIA, OP_REQUEST, OP_UNLOCK, FAMILY_ELEVATOR,
 };
@@ -150,6 +150,7 @@ struct CallHandle {
     cancel: tokio::sync::watch::Sender<bool>,
     answered: Arc<AtomicBool>,
     aseq: AtomicU32,
+    vseq: AtomicU32,
 }
 
 impl Agent {
@@ -893,6 +894,7 @@ impl Agent {
             cancel: cancel_tx,
             answered: answered.clone(),
             aseq: AtomicU32::new(0),
+            vseq: AtomicU32::new(1),
         });
         self.events.push(EventKind::Dialing { callee_id: callee_id.to_owned() });
         tracing::info!(callee = %callee_id, %dest, "dialing");
@@ -1115,6 +1117,29 @@ impl AgentMedia for Agent {
             Ok(())
         })();
         async move { result }.boxed()
+    }
+
+    fn talk_video(&self, jpeg: Arc<[u8]>) -> BoxFuture<'_, Result<(), CallError>> {
+        let prepared = {
+            let call = self.call_session.lock().unwrap();
+            match call.as_ref() {
+                Some(c) if c.answered.load(Ordering::Relaxed) => {
+                    let seq = c.vseq.fetch_add(1, Ordering::Relaxed) as u16;
+                    jpeg_packets(seq, &jpeg, &c.endpoints)
+                        .ok()
+                        .map(|pkts| (c.socket.clone(), pkts))
+                }
+                _ => None,
+            }
+        };
+        Box::pin(async move {
+            if let Some((socket, pkts)) = prepared {
+                for p in pkts {
+                    let _ = socket.send(&p).await;
+                }
+            }
+            Ok(())
+        })
     }
 }
 
@@ -1384,5 +1409,37 @@ mod tests {
             agent.on_wire(Side::Door, p);
         }
         assert!(agent.snapshot().is_some(), "monitor media must produce a snapshot");
+    }
+
+    // Browser camera -> callee: talk_video fragments the JPEG and sends it over
+    // the active call's socket as 00b7/0a media.
+    #[tokio::test]
+    async fn talk_video_forwards_jpeg_to_the_callee() {
+        let agent = test_agent().await;
+        let probe = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let probe_addr = probe.local_addr().unwrap();
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        socket.connect(probe_addr).await.unwrap();
+        let callee = Station::new("S00000000001", Ipv4Addr::new(127, 0, 0, 1));
+        let (cancel, _rx) = tokio::sync::watch::channel(false);
+        *agent.call_session.lock().unwrap() = Some(CallHandle {
+            callee: callee.clone(),
+            endpoints: Endpoints { door: Station::new("S00000000000", Ipv4Addr::new(127, 0, 0, 1)), room: callee },
+            socket,
+            cancel,
+            answered: Arc::new(AtomicBool::new(true)),
+            aseq: AtomicU32::new(0),
+            vseq: AtomicU32::new(1),
+        });
+        agent.talk_video(Arc::from(tiny_jpeg())).await.unwrap();
+        let mut buf = vec![0u8; 4096];
+        let n = tokio::time::timeout(Duration::from_secs(1), probe.recv(&mut buf))
+            .await
+            .expect("a media packet")
+            .unwrap();
+        let msg = Message::parse(&buf[..n]).unwrap();
+        assert_eq!(msg.family, FAMILY_SESSION);
+        assert_eq!(msg.opcode, OP_MEDIA);
+        assert_eq!(msg.media().unwrap().media_type, crate::protocol::MEDIA_JPEG);
     }
 }

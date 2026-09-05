@@ -367,19 +367,50 @@
   };
 
   // ---------- Outbound call (dial) ----------
+  // Send our camera to the far end during a call (browser -> JPEG -> Agent).
+  let camera = null;
+  async function startCamera() {
+    if (camera) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+      const video = document.createElement('video'); video.srcObject = stream; video.muted = true; await video.play();
+      const canvas = document.createElement('canvas'); canvas.width = 640; canvas.height = 480;
+      const g2 = canvas.getContext('2d');
+      const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/v1/talk-video.ws' + (state.token ? '?token=' + encodeURIComponent(state.token) : ''));
+      ws.binaryType = 'arraybuffer';
+      camera = { stream, video, canvas, ws, timer: null };
+      ws.onopen = () => {
+        camera.timer = setInterval(() => {
+          if (!camera || ws.readyState !== 1) return;
+          g2.drawImage(video, 0, 0, canvas.width, canvas.height);
+          canvas.toBlob((b) => { if (b && camera && ws.readyState === 1) b.arrayBuffer().then((buf) => ws.send(buf)); }, 'image/jpeg', 0.6);
+        }, 125);
+      };
+      ws.onclose = () => stopCamera();
+      logLine('已开启本机摄像头');
+    } catch (e) { toast('无法打开摄像头'); }
+  }
+  function stopCamera() {
+    if (!camera) return;
+    clearInterval(camera.timer);
+    try { camera.ws.close(); } catch (e) {}
+    try { camera.stream.getTracks().forEach((t) => t.stop()); } catch (e) {}
+    camera = null;
+  }
   el.dialInput.oninput = render;
   el.dial.onclick = async () => {
     const callee_id = el.dialInput.value.trim(); if (!callee_id) return;
     try {
       const resp = await fetch(base + '/v1/dial', { method: 'POST', headers: Object.assign(headers(), { 'Content-Type': 'application/json' }), body: JSON.stringify({ callee_id }) });
       if (resp.status === 401) { openSettings('令牌无效'); return; }
-      if (resp.ok) { state.calling = callee_id; render(); startMedia(); logLine('拨号 ' + callee_id); }
+      if (resp.ok) { state.calling = callee_id; render(); startMedia(); startTalk(); startCamera(); logLine('拨号 ' + callee_id); }
       else { const r = await resp.json().catch(() => ({})); toast('拨号失败：' + (r.error || resp.status)); }
     } catch (e) { toast('拨号失败'); }
   };
   el.dialHangup.onclick = async () => {
     try { await fetch(base + '/v1/dial/hangup', { method: 'POST', headers: headers() }); } catch (e) {}
-    state.calling = null; render(); stopMedia(); stopTalk(); logLine('挂断通话');
+    state.calling = null; render(); stopMedia(); stopTalk(); stopCamera(); logLine('挂断通话');
   };
 
   // ---------- Events (SSE) ----------
@@ -403,9 +434,9 @@
     source.addEventListener('monitor_started', (e) => { const ev = JSON.parse(e.data); state.monitoring = ev.camera_id; render(); startMedia(); logLine('查看 ' + ev.camera_id); });
     source.addEventListener('monitor_stopped', (e) => { const ev = JSON.parse(e.data); if (state.monitoring) { state.monitoring = null; render(); stopMedia(); } logLine('查看结束（' + ev.reason + '）'); });
     source.addEventListener('elevator_called', () => logLine('电梯已呼叫'));
-    source.addEventListener('dialing', (e) => { const ev = JSON.parse(e.data); state.calling = ev.callee_id; render(); startMedia(); logLine('拨号 ' + ev.callee_id); });
+    source.addEventListener('dialing', (e) => { const ev = JSON.parse(e.data); state.calling = ev.callee_id; render(); startMedia(); startTalk(); startCamera(); logLine('拨号 ' + ev.callee_id); });
     source.addEventListener('call_connected', (e) => { const ev = JSON.parse(e.data); logLine('已接通 ' + ev.callee_id); });
-    source.addEventListener('call_hung_up', (e) => { const ev = JSON.parse(e.data); if (state.calling) { state.calling = null; render(); stopMedia(); stopTalk(); } logLine('通话结束（' + ev.reason + '）'); });
+    source.addEventListener('call_hung_up', (e) => { const ev = JSON.parse(e.data); if (state.calling) { state.calling = null; render(); stopMedia(); stopTalk(); stopCamera(); } logLine('通话结束（' + ev.reason + '）'); });
   }
   async function probe() {
     try {
