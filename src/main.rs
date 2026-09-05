@@ -199,10 +199,7 @@ enum Tools {
     /// call, family 00b8): send the monitor request and take in its video and
     /// audio. Frames are saved to a directory; audio to a file or a player.
     Monitor {
-        /// Target door `ip` or `ip:port`. Omit to discover it by --door-id.
-        target: Option<String>,
-        /// Door station id to view (and to discover when `target` is omitted).
-        #[arg(long, default_value = "M00000000000")]
+        /// Door camera station id to view; its IP is resolved over UDP 10008.
         door_id: String,
         /// Our own (room/Pad) station id, written into the request.
         #[arg(long, default_value = "S00000000000")]
@@ -223,22 +220,29 @@ enum Tools {
         /// (default: monitor-audio.s16le).
         #[arg(long, value_name = "FILE")]
         audio_out: Option<PathBuf>,
-        /// Broadcast address for UDP 10008 discovery when `target` is omitted.
+        /// Where to broadcast the UDP 10008 discovery query (subnet broadcast
+        /// or 255.255.255.255).
         #[arg(long, default_value = "255.255.255.255")]
         broadcast: std::net::Ipv4Addr,
         /// Seconds to wait for a discovery reply.
         #[arg(long, default_value_t = 3.0)]
         discover_timeout: f64,
     },
-    /// Call the elevator to the requesting room's floor: send 0106/01 to the
-    /// door station and wait for its ack.
+    /// Call the elevator to the requesting room's floor: resolve the door
+    /// station by id over UDP 10008, send 0106/01 and wait for its ack.
     Elevator {
-        /// Door `ip` or `ip:port` that fronts the elevator.
-        target: String,
+        /// Door station id that fronts the elevator; its IP is resolved.
+        door_id: String,
         /// The requesting room's station id (its floor is derived from the id).
         #[arg(long, default_value = "S00000000000")]
         room_id: String,
-        /// Seconds to wait for the ack.
+        /// Where to broadcast the UDP 10008 discovery query.
+        #[arg(long, default_value = "255.255.255.255")]
+        broadcast: std::net::Ipv4Addr,
+        /// Seconds to wait for the discovery reply.
+        #[arg(long, default_value_t = 3.0)]
+        discover_timeout: f64,
+        /// Seconds to wait for the elevator ack.
         #[arg(long, default_value_t = 3.0)]
         timeout: f64,
     },
@@ -502,7 +506,6 @@ async fn run_tool(tool: Tools) -> Result<()> {
             );
         }
         Tools::Monitor {
-            target,
             door_id,
             room_id,
             out_dir,
@@ -515,18 +518,9 @@ async fn run_tool(tool: Tools) -> Result<()> {
         } => {
             use michoi::emitter::{resolve_pad, run_monitor};
             use michoi::protocol::Station;
-            let door_ip = match target {
-                Some(t) => t
-                    .split(':')
-                    .next()
-                    .unwrap()
-                    .parse::<std::net::Ipv4Addr>()
-                    .map_err(|_| anyhow::anyhow!("invalid target: {t}"))?,
-                None => {
-                    resolve_pad(&door_id, broadcast, Duration::from_secs_f64(discover_timeout))
-                        .await?
-                }
-            };
+            let door_ip =
+                resolve_pad(&door_id, broadcast, Duration::from_secs_f64(discover_timeout)).await?;
+            println!("{door_id} -> {door_ip}");
             let sink = michoi::door_station::AudioSink::open(
                 play,
                 player.as_deref(),
@@ -547,21 +541,21 @@ async fn run_tool(tool: Tools) -> Result<()> {
             );
         }
         Tools::Elevator {
-            target,
+            door_id,
             room_id,
+            broadcast,
+            discover_timeout,
             timeout,
         } => {
             use michoi::protocol::CONTROL_PORT;
-            let target = match target.parse::<SocketAddr>() {
-                Ok(addr) => addr,
-                Err(_) => SocketAddr::new(
-                    target
-                        .parse::<std::net::Ipv4Addr>()
-                        .map_err(|_| anyhow::anyhow!("invalid target: {target}"))?
-                        .into(),
-                    CONTROL_PORT,
-                ),
-            };
+            let ip = michoi::emitter::resolve_pad(
+                &door_id,
+                broadcast,
+                Duration::from_secs_f64(discover_timeout),
+            )
+            .await?;
+            println!("{door_id} -> {ip}");
+            let target = SocketAddr::new(ip.into(), CONTROL_PORT);
             let ok = michoi::emitter::request_elevator(
                 &room_id,
                 target,
