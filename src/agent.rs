@@ -34,8 +34,8 @@ use crate::agent_server::ServerConfig;
 use crate::config::{AgentMode, IntercomConfig};
 use crate::ethernet::MacAddress;
 use crate::protocol::{
-    audio_packet, bootstrap_reply, session_control, session_reply, split_coalesced, Endpoints,
-    JpegReassembler, Message, Station, FAMILY_BOOTSTRAP, FAMILY_SESSION, MEDIA_AUDIO, OP_ANSWER,
+    audio_packet, bootstrap_reply, session_control, session_reply, Endpoints, JpegReassembler,
+    Message, Station, FAMILY_BOOTSTRAP, FAMILY_SESSION, MEDIA_AUDIO, OP_ANSWER,
     OP_HANGUP, OP_KEEPALIVE, OP_MEDIA, OP_REQUEST, OP_UNLOCK, FAMILY_ELEVATOR,
 };
 use crate::state::{CallMachine, CallPhase};
@@ -133,7 +133,7 @@ pub struct Agent {
 }
 
 struct MonitorHandle {
-    camera_id: String,
+    camera: crate::protocol::Station,
     cancel: tokio::sync::watch::Sender<bool>,
 }
 
@@ -273,7 +273,12 @@ impl Agent {
     fn stop_monitor_now(&self) -> Option<String> {
         let handle = self.monitor.lock().unwrap().take()?;
         let _ = handle.cancel.send(true);
-        Some(handle.camera_id)
+        Some(handle.camera.id)
+    }
+
+    /// The camera being monitored, if any.
+    fn monitor_camera(&self) -> Option<crate::protocol::Station> {
+        self.monitor.lock().unwrap().as_ref().map(|m| m.camera.clone())
     }
 
     async fn start_monitor_now(self: &Arc<Self>, camera_id: &str) -> Result<(), CallError> {
@@ -289,15 +294,15 @@ impl Agent {
         // Replace any existing monitor.
         self.stop_monitor_now();
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let door = crate::protocol::Station::new(camera_id.to_owned(), ip);
         *self.monitor.lock().unwrap() = Some(MonitorHandle {
-            camera_id: camera_id.to_owned(),
+            camera: door.clone(),
             cancel: cancel_tx,
         });
         self.events.push(EventKind::MonitorStarted {
             camera_id: camera_id.to_owned(),
         });
         let agent = self.clone();
-        let door = crate::protocol::Station::new(camera_id.to_owned(), ip);
         tokio::spawn(async move {
             let reason = agent.run_monitor_session(&door, cancel_rx).await;
             agent.monitor.lock().unwrap().take();
@@ -317,7 +322,7 @@ impl Agent {
         door: &crate::protocol::Station,
         mut cancel: tokio::sync::watch::Receiver<bool>,
     ) -> String {
-        use crate::protocol::{monitor_request, packet, Station, FAMILY_MONITOR, MEDIA_AUDIO};
+        use crate::protocol::{monitor_request, packet, Station, FAMILY_MONITOR};
         use tokio::net::UdpSocket;
         let dest = std::net::SocketAddr::new(door.ip.into(), crate::protocol::CONTROL_PORT);
         let socket = match UdpSocket::bind("0.0.0.0:0").await {
@@ -346,10 +351,11 @@ impl Agent {
         let Ok(request) = monitor_request(&us, door) else {
             return "build_error".into();
         };
+        // Send the request and keepalives from this socket, but the door's
+        // media comes back to the well-known control port (owned by the wire),
+        // so it is fed in `on_wire`, not here. This task is TX only.
         crate::protocol::trace_packet("tx monitor", &request);
         let _ = socket.send(&request).await;
-        let mut jpeg = JpegReassembler::default();
-        let mut buf = vec![0_u8; 65_536];
         let mut keepalive = tokio::time::interval(Duration::from_secs(1));
         loop {
             tokio::select! {
@@ -365,26 +371,6 @@ impl Agent {
                     let ka = packet(FAMILY_MONITOR, OP_KEEPALIVE, 80, &block);
                     crate::protocol::trace_packet("tx monitor", &ka);
                     let _ = socket.send(&ka).await;
-                }
-                recv = socket.recv(&mut buf) => {
-                    let Ok(size) = recv else { return "recv_error".into() };
-                    for raw in split_coalesced(&buf[..size]) {
-                        crate::protocol::trace_packet("rx monitor", raw);
-                        let Ok(msg) = Message::parse(raw) else { continue };
-                        if msg.family != FAMILY_MONITOR { continue; }
-                        if msg.opcode == OP_HANGUP {
-                            return "door_hangup".into();
-                        }
-                        if msg.opcode == OP_MEDIA {
-                            let Some(media) = msg.media() else { continue };
-                            let pts_us = self.started.elapsed().as_micros() as u64;
-                            if media.media_type == MEDIA_AUDIO {
-                                self.push_audio(AudioChunk { pts_us, pcm: Arc::from(media.data) });
-                            } else if let Some(frame) = jpeg.push(&media) {
-                                self.push_video(VideoFrame { pts_us, jpeg: Arc::from(frame.as_slice()) });
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -562,6 +548,36 @@ impl Agent {
                 }
             }
             return;
+        }
+        // While monitoring, the camera's media rides the wire's well-known port
+        // (not the monitor task's socket). Feed it and skip the call-identity
+        // checks -- the camera is not the pinned call door. Cameras stream as
+        // 00b7/0a or 00b8/0a.
+        if self.monitor_camera().is_some() && message.is_session_like() {
+            match message.opcode {
+                OP_MEDIA => {
+                    if let Some(media) = message.media() {
+                        let pts_us = self.started.elapsed().as_micros() as u64;
+                        if media.media_type == MEDIA_AUDIO {
+                            self.push_audio(AudioChunk {
+                                pts_us,
+                                pcm: Arc::from(media.data),
+                            });
+                        } else if let Some(frame) = self.jpeg.lock().unwrap().push(&media) {
+                            self.push_video(VideoFrame {
+                                pts_us,
+                                jpeg: Arc::from(frame.as_slice()),
+                            });
+                        }
+                    }
+                    return;
+                }
+                OP_HANGUP => {
+                    self.stop_monitor_now();
+                    return;
+                }
+                _ => return, // swallow monitor control (03/0f/0c)
+            }
         }
         if message.family == FAMILY_ELEVATOR && message.opcode != OP_REQUEST {
             for tx in self.elevator_acks.lock().unwrap().drain(..) {
@@ -1093,5 +1109,86 @@ mod tests {
         // Incomplete (flags 0x0) entries are not trusted.
         assert_eq!(parse_arp_table(text, Ipv4Addr::new(192, 168, 124, 2)), None);
         assert_eq!(parse_arp_table(text, Ipv4Addr::new(10, 0, 0, 1)), None);
+    }
+
+    struct NoopWire;
+    impl Wire for NoopWire {
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+        fn handshake_reply(&self, _: &[u8], _: &Peers) -> Result<()> {
+            Ok(())
+        }
+        fn send_as_pad(&self, _: &[u8], _: &Peers) -> Result<()> {
+            Ok(())
+        }
+        fn on_remote_claim(&self, _: &Peers) {}
+        fn on_call_end(&self, _: &Peers) {}
+    }
+
+    async fn test_agent() -> Arc<Agent> {
+        let discovery = crate::discovery::DiscoveryService::bind(0, None).await.unwrap();
+        let peers = Peers {
+            room: Station::new("S00000000000", Ipv4Addr::new(1, 2, 3, 4)),
+            // A different door is pinned (e.g. from an earlier elevator resolve),
+            // so the monitored camera's media is rejected by the call path.
+            door: Some(Station::new("M00000000009", Ipv4Addr::new(9, 9, 9, 9))),
+            door_mac: None,
+            pad_mac: None,
+            control_port: 10_000,
+        };
+        Agent::new(
+            AgentMode::Pad,
+            Arc::new(NoopWire),
+            peers,
+            Policy { cooldown: Duration::from_secs(1), unlock_requires_answer: false },
+            Duration::from_secs(5),
+            1 << 20,
+            Vec::new(),
+            Ipv4Addr::BROADCAST,
+            Duration::from_secs(1),
+            None,
+            discovery,
+        )
+    }
+
+    fn tiny_jpeg() -> Vec<u8> {
+        let mut v = vec![0xff, 0xd8];
+        v.extend_from_slice(&[0u8; 16]);
+        v.extend_from_slice(&[0xff, 0xd9]);
+        v
+    }
+
+    // The bug: while monitoring, the camera's media arrives on the wire (not the
+    // monitor task's socket) as 00b7/0a from a door that is not the pinned call
+    // door. on_wire must feed it, not reject it.
+    #[tokio::test]
+    async fn monitor_media_is_fed_via_on_wire() {
+        let agent = test_agent().await;
+        let ep = crate::protocol::Endpoints {
+            door: Station::new("M00000000000", Ipv4Addr::new(5, 6, 7, 8)),
+            room: Station::new("S00000000000", Ipv4Addr::new(1, 2, 3, 4)),
+        };
+        let pkts = crate::protocol::jpeg_packets(1, &tiny_jpeg(), &ep).unwrap();
+
+        // No monitor: the call path rejects the mismatched door, no frame.
+        for p in &pkts {
+            agent.on_wire(Side::Door, p);
+        }
+        assert!(
+            agent.snapshot().is_none(),
+            "media from a non-pinned door must not appear without a monitor"
+        );
+
+        // Activate a monitor for a camera different from any pinned call door.
+        let (cancel, _rx) = tokio::sync::watch::channel(false);
+        *agent.monitor.lock().unwrap() = Some(MonitorHandle {
+            camera: Station::new("M00000000000", Ipv4Addr::new(5, 6, 7, 8)),
+            cancel,
+        });
+        for p in &pkts {
+            agent.on_wire(Side::Door, p);
+        }
+        assert!(agent.snapshot().is_some(), "monitor media must produce a snapshot");
     }
 }
