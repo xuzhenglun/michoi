@@ -363,6 +363,7 @@ async fn main() -> Result<()> {
                     token: Some(cfg.agent.token.clone()).filter(|t| !t.is_empty()),
                     swagger: cfg.agent.swagger,
                     web_ui: cfg.agent.web_ui,
+                    camera_resolutions: cfg.agent.camera_resolutions.clone(),
                     ..Default::default()
                 },
                 intercom: cfg.intercom,

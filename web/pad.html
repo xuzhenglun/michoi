@@ -162,9 +162,7 @@
     </div>
     <div class="row" id="camParams" hidden>
       <select id="camRes" title="分辨率">
-        <option value="320x240">320×240</option>
         <option value="640x480" selected>640×480</option>
-        <option value="1280x720">1280×720</option>
       </select>
       <select id="camFps" title="帧率">
         <option value="12" selected>12 fps</option>
@@ -510,7 +508,25 @@
   }
   setInterval(refreshAge, 5000);
 
+  // Camera resolutions come from the server config (device-dependent).
+  async function loadUiConfig() {
+    try {
+      const r = await fetch(base + '/v1/ui-config', { headers: { 'Accept': 'application/json' } });
+      if (!r.ok) return;
+      const list = (await r.json()).camera_resolutions;
+      if (!Array.isArray(list) || !list.length) return;
+      const prev = el.camRes.value;
+      el.camRes.innerHTML = '';
+      for (const v of list) {
+        const o = document.createElement('option');
+        o.value = v; o.textContent = v.replace('x', '×'); el.camRes.append(o);
+      }
+      el.camRes.value = list.includes(prev) ? prev : (list.includes('640x480') ? '640x480' : list[0]);
+    } catch (e) {}
+  }
+
   render();
+  loadUiConfig();
   probe().then((ok) => { if (ok) connectEvents(); else if (!el.settings.open) setTimeout(() => probe().then((ok2) => ok2 && connectEvents()), 3000); });
 })();
 </script>

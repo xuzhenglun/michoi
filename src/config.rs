@@ -180,9 +180,20 @@ pub struct AgentConfig {
     /// Serve the built-in browser Pad at `/`: a cross-platform fallback UI
     /// when no Matter/HAP backend is deployed. Off for headless deployments.
     pub web_ui: bool,
+    /// Resolutions the browser Pad offers for the outbound camera, "WxH".
+    /// Device-dependent: some Pads reject 720p, so keep this list to what the
+    /// hardware actually displays.
+    pub camera_resolutions: Vec<String>,
     pub tls_cert: Option<PathBuf>,
     pub tls_key: Option<PathBuf>,
     pub backend_ca: Option<PathBuf>,
+}
+
+fn default_camera_resolutions() -> Vec<String> {
+    ["320x240", "640x480", "1024x768"]
+        .into_iter()
+        .map(String::from)
+        .collect()
 }
 
 impl Default for AgentConfig {
@@ -192,6 +203,7 @@ impl Default for AgentConfig {
             token: String::new(),
             swagger: false,
             web_ui: true,
+            camera_resolutions: default_camera_resolutions(),
             tls_cert: None,
             tls_key: None,
             backend_ca: None,

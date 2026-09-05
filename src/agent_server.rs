@@ -49,6 +49,8 @@ pub struct ServerConfig {
     /// Serve the built-in browser Pad at `/` and `/pad`: a cross-platform
     /// fallback UI when no other backend is deployed. Off for headless use.
     pub web_ui: bool,
+    /// Resolutions the browser Pad offers for the outbound camera, "WxH".
+    pub camera_resolutions: Vec<String>,
     /// Range after which an event stream is closed so clients reconnect.
     pub event_stream_lifetime: (Duration, Duration),
 }
@@ -60,6 +62,11 @@ impl Default for ServerConfig {
             token: None,
             swagger: false,
             web_ui: true,
+            camera_resolutions: vec![
+                "320x240".into(),
+                "640x480".into(),
+                "1024x768".into(),
+            ],
             event_stream_lifetime: (Duration::from_secs(300), Duration::from_secs(600)),
         }
     }
@@ -442,7 +449,7 @@ async fn connection<A: AgentControl + AgentMedia>(
         tracing::debug!(%peer, method = %request.method, path = %request.path, "request");
         let public = matches!(
             request.path.as_str(),
-            "/openapi.yaml" | "/swagger" | "/" | "/pad"
+            "/openapi.yaml" | "/swagger" | "/" | "/pad" | "/v1/ui-config"
         );
         if !public && !authorized(&request, config.token.as_deref()) {
             let response = Response::error(401, "unauthorized", "bearer token required")
@@ -496,6 +503,10 @@ async fn route<A: AgentControl + AgentMedia>(
                 Response::error(404, "not_found", "the browser Pad is disabled on this server")
             }
         }
+        ("GET", "/v1/ui-config") => Response::json(
+            200,
+            &serde_json::json!({ "camera_resolutions": config.camera_resolutions }),
+        ),
         ("GET", "/swagger") => {
             if config.swagger {
                 Response::new(200, "text/html; charset=utf-8", SWAGGER_HTML.into())
