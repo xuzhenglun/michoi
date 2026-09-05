@@ -75,9 +75,12 @@ iifname \"{pad}\" ip saddr {room} udp dport {control} counter drop\n  }}\n}}\n"
     ))
 }
 
-/// `nft delete table bridge <TABLE>`, the fail-open teardown.
+/// The fail-open teardown, as an idempotent `nft -f` script: `add` ensures the
+/// table exists so the following `delete` never errors on a fresh boot with no
+/// residual table. The net effect is that the table is gone, and nft stays
+/// silent instead of printing "No such file or directory".
 pub fn flush_table_command() -> String {
-    format!("delete table bridge {TABLE}")
+    format!("add table bridge {TABLE}\ndelete table bridge {TABLE}\n")
 }
 
 #[cfg(test)]
@@ -127,6 +130,9 @@ mod tests {
     #[test]
     fn silence_and_static_share_one_table() {
         assert!(silence().contains("table bridge michoi"));
-        assert_eq!(flush_table_command(), "delete table bridge michoi");
+        assert_eq!(
+            flush_table_command(),
+            "add table bridge michoi\ndelete table bridge michoi\n"
+        );
     }
 }

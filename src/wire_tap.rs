@@ -249,13 +249,11 @@ fn nft_apply(rules: &str) -> Result<()> {
 }
 
 fn nft_flush() -> Result<()> {
-    let status = std::process::Command::new("nft")
-        .args(crate::firewall::flush_table_command().split_whitespace())
-        .status()
-        .context("running nft delete")?;
-    // A missing table is fine; the goal is that it is gone.
-    let _ = status;
-    Ok(())
+    // Idempotent + silent: the script ensures the table exists before deleting
+    // it, so a fresh boot with no residual table is not an error and nft prints
+    // nothing. Applied via `nft -f -`, reusing nft_apply. Teardown stays
+    // fail-open: callers log a warning on Err rather than aborting.
+    nft_apply(&crate::firewall::flush_table_command())
 }
 
 /// The MAC for `ip` from the kernel neighbour table, if complete.
