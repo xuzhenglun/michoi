@@ -303,8 +303,10 @@ pub trait AgentControl: Send + Sync + 'static {
         Box::pin(async { Vec::new() })
     }
 
-    /// Call the elevator to this Pad's floor.
-    fn call_elevator(&self, _command_id: &str) -> BoxFuture<'_, CommandResult> {
+    /// Call the elevator to a floor. `room_id` is the station whose floor the
+    /// car should serve (a full id or a short number); `None` means this Pad's
+    /// own floor. A neighbour's number lets a resident summon the car to visit.
+    fn call_elevator(&self, _command_id: &str, _room_id: Option<&str>) -> BoxFuture<'_, CommandResult> {
         Box::pin(async move { CommandResult::rejected("", CallError::Unsupported) })
     }
 

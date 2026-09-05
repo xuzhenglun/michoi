@@ -233,11 +233,18 @@ impl Agent {
 
     // ------------------------------------------------------ outbound: elevator
 
-    async fn call_elevator_now(&self, command_id: &str) -> CommandResult {
+    async fn call_elevator_now(&self, command_id: &str, room_id: Option<&str>) -> CommandResult {
         if let Some(replayed) = self.commands.get(command_id) {
             return replayed;
         }
-        let room_id = self.peers.lock().unwrap().room.id.clone();
+        // Default to our own floor; a caller-supplied room (full id or short
+        // number, expanded with our own id's pattern) summons the car to that
+        // floor instead -- e.g. to visit a neighbour.
+        let local = self.peers.lock().unwrap().room.id.clone();
+        let room_id = match room_id {
+            Some(r) if !r.trim().is_empty() => expand_station_number(&local, r.trim()),
+            _ => local,
+        };
         // Prefer the configured elevator door, resolved by discovery; otherwise
         // fall back to a door learned from an incoming call.
         let door_ip = match &self.elevator_door {
@@ -984,9 +991,10 @@ impl AgentControl for Agent {
         Box::pin(async move { self.list_cameras().await })
     }
 
-    fn call_elevator(&self, command_id: &str) -> BoxFuture<'_, CommandResult> {
+    fn call_elevator(&self, command_id: &str, room_id: Option<&str>) -> BoxFuture<'_, CommandResult> {
         let command_id = command_id.to_owned();
-        Box::pin(async move { self.call_elevator_now(&command_id).await })
+        let room_id = room_id.map(str::to_owned);
+        Box::pin(async move { self.call_elevator_now(&command_id, room_id.as_deref()).await })
     }
 
     fn start_monitor(&self, camera_id: &str) -> BoxFuture<'_, Result<(), CallError>> {

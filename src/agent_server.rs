@@ -663,6 +663,13 @@ struct DialRequest {
     callee_id: String,
 }
 
+#[derive(serde::Deserialize)]
+struct ElevatorRequest {
+    command_id: String,
+    #[serde(default)]
+    room_id: Option<String>,
+}
+
 async fn dial<A: AgentControl>(request: &Request, agent: &A) -> Response {
     if let Err(response) = require_accept(request, &[MEDIA_TYPE_JSON]) {
         return response;
@@ -700,14 +707,17 @@ async fn elevator<A: AgentControl>(request: &Request, agent: &A) -> Response {
     if let Err(response) = require_content_type(request, MEDIA_TYPE_JSON) {
         return response;
     }
-    let body: CommandRequest = match serde_json::from_slice(&request.body) {
+    let body: ElevatorRequest = match serde_json::from_slice(&request.body) {
         Ok(body) => body,
         Err(error) => return Response::error(400, "bad_request", format!("invalid body: {error}")),
     };
     if body.command_id.is_empty() || body.command_id.len() > 128 {
         return Response::error(400, "bad_request", "command_id must be 1..128 characters");
     }
-    let result = agent.call_elevator(&body.command_id).await;
+    if body.room_id.as_ref().is_some_and(|r| r.len() > 34) {
+        return Response::error(400, "bad_request", "room_id must be at most 34 characters");
+    }
+    let result = agent.call_elevator(&body.command_id, body.room_id.as_deref()).await;
     Response::json(result.http_status(), &result)
 }
 

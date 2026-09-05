@@ -94,6 +94,10 @@
   .menu .opt span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .menu .empty { padding: 8px 10px; color: var(--muted); font-size: 13px; }
   .menu .range { display: flex; align-items: center; gap: 10px; padding: 8px 10px 10px; }
+  .menu .field { padding: 6px 10px 10px; }
+  .menu .field input { width: 100%; padding: 9px 11px; border-radius: 9px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); font: inherit; font-variant-numeric: tabular-nums; }
+  .menu .field input::placeholder { color: var(--muted); }
+  .menu .go { width: 100%; margin-top: 8px; padding: 9px; border-radius: 9px; border: 0; background: var(--accent); color: #fff; font: inherit; cursor: pointer; }
   .menu .range svg { width: 16px; height: 16px; color: var(--muted); flex: none; }
   .menu input[type=range] { flex: 1; accent-color: var(--accent); }
   .menu hr { border: 0; border-top: 1px solid var(--line); margin: 6px 4px; }
@@ -207,8 +211,12 @@
         </div>
         <span class="lbl">查看</span>
       </div>
-      <div class="item">
-        <button class="rb" id="elevatorBtn" aria-label="叫电梯" disabled><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 15V9m0 0-2.5 2.5M9 9l2.5 2.5M15 9v6m0 0 2.5-2.5M15 15l-2.5-2.5"/></svg></button>
+      <div class="item has-chev">
+        <div class="split has-chev">
+          <button class="rb" id="elevatorBtn" aria-label="叫电梯到本层" disabled><svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 15V9m0 0-2.5 2.5M9 9l2.5 2.5M15 9v6m0 0 2.5-2.5M15 15l-2.5-2.5"/></svg></button>
+          <button class="chev" data-menu="elevatorMenu" aria-label="电梯选项" disabled><svg viewBox="0 0 24 24"><path d="M6 15l6-6 6 6"/></svg></button>
+          <div class="menu" id="elevatorMenu" hidden></div>
+        </div>
         <span class="lbl">电梯</span>
       </div>
       <div class="item">
@@ -302,7 +310,7 @@
     micSplit: $('micSplit'), mic: $('micBtn'), camSplit: $('camSplit'), cam: $('camBtn'), spkSplit: $('spkSplit'), spk: $('spkBtn'),
     micMenu: $('micMenu'), camMenu: $('camMenu'), spkMenu: $('spkMenu'), viewMenu: $('viewMenu'),
     actIdle: $('actIdle'), actRinging: $('actRinging'), actDoor: $('actDoor'), actCalling: $('actCalling'), actMonitor: $('actMonitor'),
-    dial: $('dialBtn'), view: $('viewBtn'), elevator: $('elevatorBtn'), unlockIdle: $('unlockIdleBtn'),
+    dial: $('dialBtn'), view: $('viewBtn'), elevator: $('elevatorBtn'), elevatorMenu: $('elevatorMenu'), unlockIdle: $('unlockIdleBtn'),
     answer: $('answerBtn'), unlockRing: $('unlockRingBtn'), reject: $('rejectBtn'), unlock: $('unlockBtn'), hangup: $('hangupBtn'),
     dialHangup: $('dialHangupBtn'), viewStop: $('viewStopBtn'),
     dialSheet: $('dialSheet'), dialInput: $('dialInput'), dialPreview: $('dialPreview'), recent: $('recent'), dialCancel: $('dialCancel'), dialGo: $('dialGo'),
@@ -363,6 +371,7 @@
     el.actIdle.hidden = mode !== 'idle'; el.actRinging.hidden = mode !== 'ringing'; el.actDoor.hidden = mode !== 'door';
     el.actCalling.hidden = mode !== 'calling'; el.actMonitor.hidden = mode !== 'monitor';
     el.dial.disabled = !on; el.view.disabled = !on; el.elevator.disabled = !on; el.unlockIdle.disabled = !on;
+    document.querySelector('[data-menu=elevatorMenu]').disabled = !on;
     el.unlock.disabled = !on; el.hangup.disabled = !(on && m);
     document.title = r ? '🔔 门口有人呼叫' : '门口机';
   }
@@ -428,6 +437,18 @@
       const slider = row.querySelector('input'); slider.value = String(Math.round(volume * 100));
       slider.oninput = () => { volume = Number(slider.value) / 100; localStorage.setItem('padVolume', String(volume)); if (!soundOn && volume > 0) { soundOn = true; localStorage.setItem('padSound', 'on'); render(); } applyVolume(); };
       m.append(row);
+    },
+    elevatorMenu: async () => {
+      const m = el.elevatorMenu; m.innerHTML = '';
+      m.append(head('电梯到本层或某户'));
+      const f = document.createElement('div'); f.className = 'field';
+      f.innerHTML = '<input placeholder="房间号，如 3003（造访邻居）" inputmode="numeric" autocomplete="off"><button class="go">呼叫电梯</button>';
+      const input = f.querySelector('input'), go = f.querySelector('.go');
+      const call = () => { const v = input.value.trim(); callElevator(v); closeMenus(); };
+      go.onclick = call;
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); call(); } });
+      m.append(f);
+      setTimeout(() => input.focus(), 30);
     },
     viewMenu: async () => {
       const m = el.viewMenu; m.innerHTML = ''; m.append(head('查看摄像头'));
@@ -609,15 +630,19 @@
   const doUnlock = async () => { try { await command('unlock'); toast('已开锁'); logLine('已开锁'); } catch (e) {} };
   el.unlock.onclick = doUnlock; el.unlockRing.onclick = doUnlock; el.unlockIdle.onclick = doUnlock;
 
-  // ---------- Elevator ----------
-  el.elevator.onclick = async () => {
+  // ---------- Elevator (own floor, or a neighbour's room) ----------
+  async function callElevator(room) {
+    const where = room ? fullStationId(room) : '';
+    const body = { command_id: cmdId() }; if (where) body.room_id = where;
     try {
-      const resp = await fetch(base + '/v1/elevator', { method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ command_id: cmdId() }) });
+      const resp = await fetch(base + '/v1/elevator', { method: 'POST', headers: jsonHeaders(), body: JSON.stringify(body) });
       if (resp.status === 401) { openSettings('令牌无效'); return; }
       const r = await resp.json().catch(() => ({}));
-      if (r.ok) { toast('已呼叫电梯'); logLine('已呼叫电梯到本层'); } else toast('呼叫电梯失败：' + (r.error || resp.status));
+      if (r.ok) { toast('已呼叫电梯'); logLine(where ? '已呼叫电梯到 ' + where : '已呼叫电梯到本层'); }
+      else toast('呼叫电梯失败：' + (r.error || resp.status));
     } catch (e) { toast('呼叫电梯失败'); }
-  };
+  }
+  el.elevator.onclick = () => callElevator('');
 
   // ---------- Monitor (one-way view of a door camera) ----------
   async function startMonitor(camera_id) {

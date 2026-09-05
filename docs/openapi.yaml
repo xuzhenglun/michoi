@@ -362,15 +362,31 @@ paths:
   /v1/elevator:
     post:
       tags: [elevator]
-      summary: Call the elevator to this Pad's floor
+      summary: Call the elevator to this Pad's floor or a neighbour's
       description: |
         Send an elevator call (`0106/01`) to the door station and wait for its
-        acknowledgement. The floor is derived by the controller from the Pad's
-        room station id; the request carries no floor. Idempotent by
-        `command_id`.
+        acknowledgement. The floor is derived by the controller from a room
+        station id: `room_id` when given (a full id or a short number, expanded
+        with this Pad's own id pattern — e.g. to summon the car to a neighbour's
+        floor), otherwise this Pad's own room. Idempotent by `command_id`.
       operationId: callElevator
       requestBody:
-        $ref: "#/components/requestBodies/Command"
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [command_id]
+              properties:
+                command_id:
+                  type: string
+                  description: Idempotency key.
+                room_id:
+                  type: string
+                  maxLength: 34
+                  description: >-
+                    Target room whose floor the car should serve; a full station
+                    id or a short number. Omit for this Pad's own floor.
       responses:
         "200":
           $ref: "#/components/responses/CommandOk"
