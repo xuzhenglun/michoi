@@ -30,6 +30,8 @@ discovery_port = 10008
 # protocol has no discovery for these). Reachable ones show video via
 # GET /v1/cameras + POST /v1/monitor. Example entrance doors:
 # cameras = ["M00000000000", "M00000000001", "M00000000002"]
+# Door that fronts the elevator; POST /v1/elevator resolves it by discovery.
+# elevator_door = "M00000000000"
 
 [agent]
 # HTTP control plane (REST + Server-Sent Events), see docs/openapi.yaml.

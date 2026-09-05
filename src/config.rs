@@ -117,6 +117,9 @@ pub struct IntercomConfig {
     /// Door camera station ids offered as viewable cameras (the provisioned
     /// roster; the protocol has no discovery for these). Empty = none listed.
     pub cameras: Vec<String>,
+    /// Station id of the door that fronts the elevator; resolved by discovery
+    /// when the elevator is called. Unset = only a door learned from a call.
+    pub elevator_door: Option<String>,
 }
 
 impl Default for IntercomConfig {
@@ -137,6 +140,7 @@ impl Default for IntercomConfig {
             control_port: 10_000,
             discovery_port: 10_008,
             cameras: Vec::new(),
+            elevator_door: None,
         }
     }
 }

@@ -119,6 +119,8 @@ pub struct Agent {
     /// Where UDP 10008 discovery is broadcast (subnet or limited broadcast).
     broadcast: Ipv4Addr,
     discover_timeout: Duration,
+    /// Station id of the door that fronts the elevator (resolved on demand).
+    elevator_door: Option<String>,
     /// The active monitor session, if any (its cancel signal + camera id).
     monitor: Mutex<Option<MonitorHandle>>,
     /// A weak handle to self, so &self methods can spawn tasks needing Arc.
@@ -142,6 +144,7 @@ impl Agent {
         roster: Vec<String>,
         broadcast: Ipv4Addr,
         discover_timeout: Duration,
+        elevator_door: Option<String>,
     ) -> Arc<Self> {
         let (video, _) = broadcast::channel(32);
         let (audio, _) = broadcast::channel(128);
@@ -168,6 +171,7 @@ impl Agent {
             roster,
             broadcast,
             discover_timeout,
+            elevator_door,
             monitor: Mutex::new(None),
         })
     }
@@ -206,12 +210,21 @@ impl Agent {
         if let Some(replayed) = self.commands.get(command_id) {
             return replayed;
         }
-        let (room_id, door_ip) = {
-            let peers = self.peers.lock().unwrap();
-            (
-                peers.room.id.clone(),
-                peers.door.as_ref().map(|d| d.ip).filter(|ip| !ip.is_unspecified()),
-            )
+        let room_id = self.peers.lock().unwrap().room.id.clone();
+        // Prefer the configured elevator door, resolved by discovery; otherwise
+        // fall back to a door learned from an incoming call.
+        let door_ip = match &self.elevator_door {
+            Some(id) => crate::emitter::resolve_pad(id, self.broadcast, self.discover_timeout)
+                .await
+                .ok(),
+            None => self
+                .peers
+                .lock()
+                .unwrap()
+                .door
+                .as_ref()
+                .map(|d| d.ip)
+                .filter(|ip| !ip.is_unspecified()),
         };
         let result = match door_ip {
             None => CommandResult::rejected(command_id, CallError::NoCall),
@@ -882,6 +895,7 @@ pub struct Run {
     pub discover_timeout: Duration,
     pub roster: Vec<String>,
     pub broadcast: Ipv4Addr,
+    pub elevator_door: Option<String>,
 }
 
 /// Parse one MAC from `/proc/net/arp` text for `ip` (complete entries only).
@@ -965,6 +979,7 @@ pub async fn run_agent(run: Run) -> Result<()> {
                 run.roster.clone(),
                 run.broadcast,
                 run.discover_timeout,
+                run.elevator_door.clone(),
             );
             tokio::spawn(wire.clone().run(agent.clone()));
             tokio::spawn(crate::wire_udp::discovery_responder(ic.discovery_port, ic.device_id.clone()));
@@ -1003,6 +1018,7 @@ pub async fn run_agent(run: Run) -> Result<()> {
                     run.roster.clone(),
                     run.broadcast,
                     run.discover_timeout,
+                    run.elevator_door.clone(),
                 );
                 let capture = agent.clone();
                 tokio::task::spawn_blocking(move || {

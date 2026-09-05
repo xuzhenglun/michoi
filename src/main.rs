@@ -319,6 +319,7 @@ async fn main() -> Result<()> {
                 .context("configuration (pass --device-id or a config file)")?;
             let roster = cfg.intercom.cameras.clone();
             let broadcast = cfg.intercom.discovery_broadcast()?;
+            let elevator_door = cfg.intercom.elevator_door.clone();
             let run = michoi::agent::Run {
                 server: michoi::agent_server::ServerConfig {
                     listen: cfg.agent.http_listen,
@@ -337,6 +338,7 @@ async fn main() -> Result<()> {
                 discover_timeout: Duration::from_secs_f64(discover_timeout),
                 roster,
                 broadcast,
+                elevator_door,
             };
             michoi::agent::run_agent(run).await?;
         }
