@@ -155,9 +155,13 @@
       <button class="mini" id="viewStopBtn" hidden>停止查看</button>
     </div>
     <div class="row">
-      <input id="dialInput" placeholder="拨号：对方设备号" autocomplete="off">
+      <select id="dialType" title="呼叫类型">
+        <option value="S">室内机·通话</option>
+        <option value="M">门口机·监控</option>
+      </select>
+      <input id="dialInput" placeholder="号码，如 3003" autocomplete="off" inputmode="numeric">
       <button class="mini" id="dialBtn" disabled>拨号</button>
-      <button class="mini" id="dialHangupBtn" hidden>挂断通话</button>
+      <button class="mini" id="dialHangupBtn" hidden>挂断</button>
     </div>
   </section>
 
@@ -187,7 +191,7 @@
     answer: $('answerBtn'), unlock: $('unlockBtn'), hangup: $('hangupBtn'), talk: $('talkBtn'), talkLabel: $('talkLabel'),
     log: $('log'), toast: $('toast'), settings: $('settings'), tokenInput: $('tokenInput'), soundWave: $('soundWave'),
     elevator: $('elevatorBtn'), cameraSelect: $('cameraSelect'), view: $('viewBtn'), viewStop: $('viewStopBtn'),
-    dialInput: $('dialInput'), dial: $('dialBtn'), dialHangup: $('dialHangupBtn'),
+    dialType: $('dialType'), dialInput: $('dialInput'), dial: $('dialBtn'), dialHangup: $('dialHangupBtn'),
   };
   const base = location.origin;
   const withToken = (path) => base + path + (state.token ? (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(state.token) : '');
@@ -220,7 +224,8 @@
     el.elevator.disabled = !state.online;
     el.view.disabled = !(state.online && !state.monitoring && el.cameraSelect.value !== '');
     el.viewStop.hidden = !state.monitoring;
-    el.dial.disabled = !(state.online && !state.calling && el.dialInput.value.trim() !== '');
+    el.dial.disabled = !(state.online && !state.calling && !state.monitoring && el.dialInput.value.trim() !== '');
+    el.dial.textContent = el.dialType.value === 'M' ? '查看' : '拨号';
     el.dialHangup.hidden = !state.calling;
     document.title = ringing ? '🔔 门口有人呼叫' : '门口机';
   }
@@ -400,12 +405,34 @@
     camera = null;
   }
   el.dialInput.oninput = render;
+  el.dialType.onchange = render;
+  // Compose a full station id from the type (S/M) + number, using our own id's
+  // pattern (e.g. S00000000000 + M + "0100" -> M00000000000). A value that is
+  // already a full id (starts with a letter) passes through.
+  function fullStationId(type, value) {
+    if (/^[A-Za-z]/.test(value)) return value;
+    const local = state.deviceId || 'S00000000000';
+    if (local.length <= value.length + 1) return type + value;
+    return type + local.slice(1, local.length - 1 - value.length) + value + local.slice(-1);
+  }
   el.dial.onclick = async () => {
-    const callee_id = el.dialInput.value.trim(); if (!callee_id) return;
+    const value = el.dialInput.value.trim(); if (!value) return;
+    const type = el.dialType.value;
+    const id = fullStationId(type, value);
+    if (type === 'M') {
+      // Door station: view its camera (monitor), not a voice call.
+      try {
+        const resp = await fetch(base + '/v1/monitor', { method: 'POST', headers: Object.assign(headers(), { 'Content-Type': 'application/json' }), body: JSON.stringify({ camera_id: id }) });
+        if (resp.status === 401) { openSettings('令牌无效'); return; }
+        if (resp.ok) { state.monitoring = id; render(); startMedia(); logLine('查看门口机 ' + id); }
+        else { const r = await resp.json().catch(() => ({})); toast('查看失败：' + (r.error || resp.status)); }
+      } catch (e) { toast('查看失败'); }
+      return;
+    }
     try {
-      const resp = await fetch(base + '/v1/dial', { method: 'POST', headers: Object.assign(headers(), { 'Content-Type': 'application/json' }), body: JSON.stringify({ callee_id }) });
+      const resp = await fetch(base + '/v1/dial', { method: 'POST', headers: Object.assign(headers(), { 'Content-Type': 'application/json' }), body: JSON.stringify({ callee_id: id }) });
       if (resp.status === 401) { openSettings('令牌无效'); return; }
-      if (resp.ok) { state.calling = callee_id; render(); startMedia(); startTalk(); startCamera(); logLine('拨号 ' + callee_id); }
+      if (resp.ok) { state.calling = id; render(); startMedia(); startTalk(); startCamera(); logLine('拨号 ' + id); }
       else { const r = await resp.json().catch(() => ({})); toast('拨号失败：' + (r.error || resp.status)); }
     } catch (e) { toast('拨号失败'); }
   };
@@ -443,7 +470,7 @@
     try {
       const resp = await fetch(base + '/v1/state', { headers: headers() });
       if (resp.status === 401) { openSettings('需要访问令牌'); return false; }
-      const s = await resp.json(); applyState(s); $('title').textContent = s.room_id ? '门口机 · ' + s.room_id : '门口机';
+      const s = await resp.json(); applyState(s); if (s.room_id) state.deviceId = s.room_id; $('title').textContent = s.room_id ? '门口机 · ' + s.room_id : '门口机';
       return true;
     } catch (e) { state.online = false; render(); return false; }
   }
