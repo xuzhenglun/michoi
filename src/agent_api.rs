@@ -149,6 +149,8 @@ pub enum CallError {
     AgentOffline,
     #[error("this operation is not supported in this mode")]
     Unsupported,
+    #[error("the callee did not answer discovery (offline or wrong number)")]
+    CalleeUnreachable,
 }
 
 impl CallError {
@@ -158,6 +160,7 @@ impl CallError {
             Self::UnlockCooldown => 429,
             Self::AgentOffline => 503,
             Self::Unsupported => 501,
+            Self::CalleeUnreachable => 502,
             _ => 409,
         }
     }

@@ -854,11 +854,19 @@ impl Agent {
         if self.monitor.lock().unwrap().is_some() || self.call_session.lock().unwrap().is_some() {
             return Err(CallError::PadOwnsCall);
         }
+        // Accept a short dialled number (e.g. "3003") and expand it to a full
+        // station id using our own id's pattern.
+        let local = self.peers.lock().unwrap().room.id.clone();
+        let callee_id = expand_station_number(&local, callee_id);
+        let callee_id = callee_id.as_str();
+        if callee_id != local || callee_id.is_empty() {
+            tracing::info!(dialing = callee_id, "resolving callee");
+        }
         let ip = self
             .discovery
             .resolve(callee_id, self.broadcast, self.discover_timeout)
             .await
-            .ok_or(CallError::AgentOffline)?;
+            .ok_or(CallError::CalleeUnreachable)?;
         let dest = std::net::SocketAddr::new(ip.into(), crate::protocol::CONTROL_PORT);
         let socket = Arc::new(
             UdpSocket::bind("0.0.0.0:0")
@@ -1159,6 +1167,22 @@ pub struct Run {
     pub elevator_door: Option<String>,
 }
 
+/// Expand a short dialled number to a full station id using the local id's
+/// pattern: prefix + <number> + last char (e.g. device S00000000000 + "3003"
+/// -> S00000030030). Non-numeric input is already a full id and returned as-is.
+pub fn expand_station_number(local: &str, input: &str) -> String {
+    if input.is_empty() || !input.bytes().all(|b| b.is_ascii_digit()) {
+        return input.to_owned();
+    }
+    if local.len() > input.len() + 1 {
+        let prefix = &local[..local.len() - 1 - input.len()];
+        let suffix = &local[local.len() - 1..];
+        format!("{prefix}{input}{suffix}")
+    } else {
+        input.to_owned()
+    }
+}
+
 /// Parse one MAC from `/proc/net/arp` text for `ip` (complete entries only).
 pub fn parse_arp_table(text: &str, ip: Ipv4Addr) -> Option<MacAddress> {
     let want = ip.to_string();
@@ -1409,6 +1433,15 @@ mod tests {
             agent.on_wire(Side::Door, p);
         }
         assert!(agent.snapshot().is_some(), "monitor media must produce a snapshot");
+    }
+
+    #[test]
+    fn short_dial_numbers_expand_to_full_station_ids() {
+        assert_eq!(expand_station_number("S00000000000", "3003"), "S00000030030");
+        assert_eq!(expand_station_number("S00000000000", "1103"), "S00000000000");
+        // A full station id passes through unchanged.
+        assert_eq!(expand_station_number("S00000000000", "S00000030030"), "S00000030030");
+        assert_eq!(expand_station_number("S00000000000", ""), "");
     }
 
     // Browser camera -> callee: talk_video fragments the JPEG and sends it over

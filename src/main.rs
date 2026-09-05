@@ -622,6 +622,7 @@ async fn run_tool(tool: Tools) -> Result<()> {
         } => {
             use michoi::emitter::{resolve_pad, run_outbound_call, MediaSource};
             use michoi::protocol::Station;
+            let callee_id = michoi::agent::expand_station_number(&caller_id, &callee_id);
             let ip =
                 resolve_pad(&callee_id, broadcast, Duration::from_secs_f64(discover_timeout)).await?;
             println!("{callee_id} -> {ip}");
