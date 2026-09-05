@@ -1438,7 +1438,8 @@ mod tests {
     #[test]
     fn short_dial_numbers_expand_to_full_station_ids() {
         assert_eq!(expand_station_number("S00000000000", "3003"), "S00000030030");
-        assert_eq!(expand_station_number("S00000000000", "1103"), "S00000000000");
+        // The device's own short number reproduces its full id.
+        assert_eq!(expand_station_number("S00000000000", "0000"), "S00000000000");
         // A full station id passes through unchanged.
         assert_eq!(expand_station_number("S00000000000", "S00000030030"), "S00000030030");
         assert_eq!(expand_station_number("S00000000000", ""), "");
