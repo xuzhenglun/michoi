@@ -502,7 +502,13 @@ pub async fn request_elevator(
     target: SocketAddr,
     timeout: Duration,
 ) -> Result<bool> {
-    let socket = UdpSocket::bind(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)).await?;
+    // Source from the control port like a real Pad; some doors only reply to
+    // :10000. Fall back to an ephemeral port if it is taken.
+    let bind = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), crate::protocol::CONTROL_PORT);
+    let socket = match UdpSocket::bind(bind).await {
+        Ok(socket) => socket,
+        Err(_) => UdpSocket::bind(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)).await?,
+    };
     socket
         .connect(target)
         .await
@@ -511,7 +517,7 @@ pub async fn request_elevator(
         .send(&elevator_request(room_id)?)
         .await
         .context("sending elevator call")?;
-    tracing::info!(%target, room_id, "elevator: call sent (0106/01)");
+    tracing::info!(%target, %bind, room_id, "elevator: call sent (0106/01)");
     let mut buf = vec![0_u8; 1024];
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
