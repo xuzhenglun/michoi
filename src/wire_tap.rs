@@ -25,7 +25,7 @@ use crate::config::IntercomConfig;
 use crate::ethernet::{build_udp_ipv4, EthernetUdp, MacAddress};
 use crate::protocol::{
     discovery_reply_room, discovery_request_room, session_control, split_coalesced, Message,
-    FAMILY_SESSION, OP_HANGUP,
+    FAMILY_ELEVATOR, FAMILY_MONITOR, FAMILY_SESSION, OP_HANGUP,
 };
 
 pub struct TapWire {
@@ -98,26 +98,35 @@ impl TapWire {
                 let Ok(message) = Message::parse(raw) else {
                     continue;
                 };
-                if message.family != FAMILY_SESSION {
-                    continue;
+                match message.family {
+                    // Monitor (00b8) and elevator (0106) are Pad-initiated: the
+                    // camera/door replies to the Pad's IP, seen here on the
+                    // bridge. Feed them straight to on_wire (it filters by the
+                    // active monitor / pending elevator, no call pinning).
+                    FAMILY_MONITOR | FAMILY_ELEVATOR => {
+                        agent.on_wire(Side::Door, raw);
+                    }
+                    FAMILY_SESSION => {
+                        let Some(endpoints) = message.endpoints() else {
+                            continue;
+                        };
+                        if endpoints.room.id != device_id {
+                            continue;
+                        }
+                        let side = if udp.source_ip == endpoints.room.ip {
+                            Side::Pad
+                        } else if udp.source_ip == endpoints.door.ip {
+                            Side::Door
+                        } else {
+                            continue;
+                        };
+                        if !agent.pin_mac(side, udp.source_mac) {
+                            continue;
+                        }
+                        agent.on_wire(side, raw);
+                    }
+                    _ => {}
                 }
-                let Some(endpoints) = message.endpoints() else {
-                    continue;
-                };
-                if endpoints.room.id != device_id {
-                    continue;
-                }
-                let side = if udp.source_ip == endpoints.room.ip {
-                    Side::Pad
-                } else if udp.source_ip == endpoints.door.ip {
-                    Side::Door
-                } else {
-                    continue;
-                };
-                if !agent.pin_mac(side, udp.source_mac) {
-                    continue;
-                }
-                agent.on_wire(side, raw);
             }
         }
     }

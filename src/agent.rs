@@ -126,6 +126,8 @@ pub struct Agent {
     /// Pending elevator-ack waiters, completed by on_wire when 0106/02 is seen
     /// (on the wire socket in pad mode, or the bridge in tap mode).
     elevator_acks: Mutex<Vec<tokio::sync::oneshot::Sender<()>>>,
+    /// JPEG frames fed from the active monitor (for an observable INFO log).
+    monitor_frames: AtomicU32,
     /// The active monitor session, if any (its cancel signal + camera id).
     monitor: Mutex<Option<MonitorHandle>>,
     /// A weak handle to self, so &self methods can spawn tasks needing Arc.
@@ -180,6 +182,7 @@ impl Agent {
             elevator_door,
             discovery,
             elevator_acks: Mutex::new(Vec::new()),
+            monitor_frames: AtomicU32::new(0),
             monitor: Mutex::new(None),
         })
     }
@@ -299,6 +302,7 @@ impl Agent {
             camera: door.clone(),
             cancel: cancel_tx,
         });
+        self.monitor_frames.store(0, Ordering::Relaxed);
         self.events.push(EventKind::MonitorStarted {
             camera_id: camera_id.to_owned(),
         });
@@ -564,6 +568,10 @@ impl Agent {
                                 pcm: Arc::from(media.data),
                             });
                         } else if let Some(frame) = self.jpeg.lock().unwrap().push(&media) {
+                            let n = self.monitor_frames.fetch_add(1, Ordering::Relaxed);
+                            if n == 0 || n % 100 == 0 {
+                                tracing::info!(frames = n + 1, "monitor: video frame from camera");
+                            }
                             self.push_video(VideoFrame {
                                 pts_us,
                                 jpeg: Arc::from(frame.as_slice()),

@@ -417,7 +417,10 @@ pub fn discovery_reply(room_id: &str) -> Result<[u8; 35], ProtocolError> {
 
 fn logical_size(data: &[u8]) -> Option<usize> {
     let msg = Message::parse(data).ok()?;
-    if msg.family == FAMILY_SESSION && msg.opcode == OP_MEDIA && data.len() >= 90 {
+    if (msg.family == FAMILY_SESSION || msg.family == FAMILY_MONITOR)
+        && msg.opcode == OP_MEDIA
+        && data.len() >= 90
+    {
         return match u16::from_le_bytes([data[80], data[81]]) {
             MEDIA_JPEG => Some(1290),
             MEDIA_AUDIO => Some(602),
