@@ -364,6 +364,9 @@ async fn main() -> Result<()> {
                     swagger: cfg.agent.swagger,
                     web_ui: cfg.agent.web_ui,
                     camera_resolutions: cfg.agent.camera_resolutions.clone(),
+                    camera_resolution_default: cfg.agent.camera_resolution_default.clone(),
+                    camera_fps: cfg.agent.camera_fps.clone(),
+                    camera_fps_default: cfg.agent.camera_fps_default,
                     ..Default::default()
                 },
                 intercom: cfg.intercom,

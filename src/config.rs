@@ -184,6 +184,12 @@ pub struct AgentConfig {
     /// Device-dependent: some Pads reject 720p, so keep this list to what the
     /// hardware actually displays.
     pub camera_resolutions: Vec<String>,
+    /// Resolution preselected in the browser Pad (should be in the list above).
+    pub camera_resolution_default: String,
+    /// Frame rates the browser Pad offers for the outbound camera.
+    pub camera_fps: Vec<u32>,
+    /// Frame rate preselected in the browser Pad (should be in the list above).
+    pub camera_fps_default: u32,
     pub tls_cert: Option<PathBuf>,
     pub tls_key: Option<PathBuf>,
     pub backend_ca: Option<PathBuf>,
@@ -204,6 +210,9 @@ impl Default for AgentConfig {
             swagger: false,
             web_ui: true,
             camera_resolutions: default_camera_resolutions(),
+            camera_resolution_default: "640x480".into(),
+            camera_fps: vec![12, 24, 48],
+            camera_fps_default: 24,
             tls_cert: None,
             tls_key: None,
             backend_ca: None,

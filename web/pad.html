@@ -165,9 +165,7 @@
         <option value="640x480" selected>640×480</option>
       </select>
       <select id="camFps" title="帧率">
-        <option value="12" selected>12 fps</option>
-        <option value="24">24 fps</option>
-        <option value="48">48 fps</option>
+        <option value="24" selected>24 fps</option>
       </select>
     </div>
   </section>
@@ -509,19 +507,24 @@
   setInterval(refreshAge, 5000);
 
   // Camera resolutions come from the server config (device-dependent).
+  function fillSelect(sel, list, def, label) {
+    if (!Array.isArray(list) || !list.length) return;
+    const prev = sel.value;
+    sel.innerHTML = '';
+    for (const v of list) {
+      const o = document.createElement('option');
+      o.value = String(v); o.textContent = label(v); sel.append(o);
+    }
+    const want = list.includes(prev) ? prev : (list.includes(def) ? def : list[0]);
+    sel.value = String(want);
+  }
   async function loadUiConfig() {
     try {
       const r = await fetch(base + '/v1/ui-config', { headers: { 'Accept': 'application/json' } });
       if (!r.ok) return;
-      const list = (await r.json()).camera_resolutions;
-      if (!Array.isArray(list) || !list.length) return;
-      const prev = el.camRes.value;
-      el.camRes.innerHTML = '';
-      for (const v of list) {
-        const o = document.createElement('option');
-        o.value = v; o.textContent = v.replace('x', '×'); el.camRes.append(o);
-      }
-      el.camRes.value = list.includes(prev) ? prev : (list.includes('640x480') ? '640x480' : list[0]);
+      const c = await r.json();
+      fillSelect(el.camRes, c.camera_resolutions, c.camera_resolution_default, (v) => String(v).replace('x', '×'));
+      fillSelect(el.camFps, c.camera_fps, c.camera_fps_default, (v) => v + ' fps');
     } catch (e) {}
   }
 

@@ -45,10 +45,13 @@ swagger = false
 # Matter/HAP backend is deployed. Set false for headless deployments.
 web_ui = true
 
-# Resolutions the browser Pad offers for the outbound camera ("WxH"). Device-
-# dependent: this Pad does not display 720p, so the list stays at what the
-# hardware actually renders. First entry containing 640x480 is preselected.
+# Camera the browser Pad sends on an outbound call. The lists are what the UI
+# offers; the *_default is preselected. Resolution is device-dependent (this Pad
+# does not display 720p); FPS is free on the wire.
 camera_resolutions = ["320x240", "640x480", "1024x768"]
+camera_resolution_default = "640x480"
+camera_fps = [12, 24, 48]
+camera_fps_default = 24
 
 [media]
 # lite never decodes untrusted JPEG on the MT7628.

@@ -51,6 +51,12 @@ pub struct ServerConfig {
     pub web_ui: bool,
     /// Resolutions the browser Pad offers for the outbound camera, "WxH".
     pub camera_resolutions: Vec<String>,
+    /// Resolution preselected in the browser Pad.
+    pub camera_resolution_default: String,
+    /// Frame rates the browser Pad offers for the outbound camera.
+    pub camera_fps: Vec<u32>,
+    /// Frame rate preselected in the browser Pad.
+    pub camera_fps_default: u32,
     /// Range after which an event stream is closed so clients reconnect.
     pub event_stream_lifetime: (Duration, Duration),
 }
@@ -67,6 +73,9 @@ impl Default for ServerConfig {
                 "640x480".into(),
                 "1024x768".into(),
             ],
+            camera_resolution_default: "640x480".into(),
+            camera_fps: vec![12, 24, 48],
+            camera_fps_default: 24,
             event_stream_lifetime: (Duration::from_secs(300), Duration::from_secs(600)),
         }
     }
@@ -505,7 +514,12 @@ async fn route<A: AgentControl + AgentMedia>(
         }
         ("GET", "/v1/ui-config") => Response::json(
             200,
-            &serde_json::json!({ "camera_resolutions": config.camera_resolutions }),
+            &serde_json::json!({
+                "camera_resolutions": config.camera_resolutions,
+                "camera_resolution_default": config.camera_resolution_default,
+                "camera_fps": config.camera_fps,
+                "camera_fps_default": config.camera_fps_default,
+            }),
         ),
         ("GET", "/swagger") => {
             if config.swagger {
