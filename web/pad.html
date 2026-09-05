@@ -157,6 +157,7 @@
     <div class="row">
       <input id="dialInput" placeholder="拨号：室内机号码，如 3003" autocomplete="off" inputmode="numeric">
       <button class="mini" id="dialBtn" disabled>拨号</button>
+      <button class="mini" id="camBtn" hidden>开摄像头</button>
       <button class="mini" id="dialHangupBtn" hidden>挂断</button>
     </div>
   </section>
@@ -187,7 +188,7 @@
     answer: $('answerBtn'), unlock: $('unlockBtn'), hangup: $('hangupBtn'), talk: $('talkBtn'), talkLabel: $('talkLabel'),
     log: $('log'), toast: $('toast'), settings: $('settings'), tokenInput: $('tokenInput'), soundWave: $('soundWave'),
     elevator: $('elevatorBtn'), cameraSelect: $('cameraSelect'), view: $('viewBtn'), viewStop: $('viewStopBtn'),
-    dialInput: $('dialInput'), dial: $('dialBtn'), dialHangup: $('dialHangupBtn'),
+    dialInput: $('dialInput'), dial: $('dialBtn'), cam: $('camBtn'), dialHangup: $('dialHangupBtn'),
   };
   const base = location.origin;
   const withToken = (path) => base + path + (state.token ? (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(state.token) : '');
@@ -220,6 +221,8 @@
     el.elevator.disabled = !state.online;
     el.view.disabled = !(state.online && !state.monitoring && el.cameraSelect.value !== '');
     el.viewStop.hidden = !state.monitoring;
+    el.cam.hidden = !state.calling;
+    el.cam.textContent = camera ? '关摄像头' : '开摄像头';
     el.dial.disabled = !(state.online && !state.calling && !state.monitoring && el.dialInput.value.trim() !== '');
     el.dialHangup.hidden = !state.calling;
     document.title = ringing ? '🔔 门口有人呼叫' : '门口机';
@@ -382,13 +385,17 @@
       const g2 = canvas.getContext('2d');
       const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/v1/talk-video.ws' + (state.token ? '?token=' + encodeURIComponent(state.token) : ''));
       ws.binaryType = 'arraybuffer';
-      camera = { stream, video, canvas, ws, timer: null };
+      camera = { stream, video, canvas, ws, timer: null, busy: false };
       ws.onopen = () => {
         camera.timer = setInterval(() => {
-          if (!camera || ws.readyState !== 1) return;
+          if (!camera || camera.busy || ws.readyState !== 1) return;
+          camera.busy = true;
           g2.drawImage(video, 0, 0, canvas.width, canvas.height);
-          canvas.toBlob((b) => { if (b && camera && ws.readyState === 1) b.arrayBuffer().then((buf) => ws.send(buf)); }, 'image/jpeg', 0.6);
-        }, 125);
+          canvas.toBlob((b) => {
+            if (b && camera && ws.readyState === 1) b.arrayBuffer().then((buf) => { try { ws.send(buf); } catch (e) {} camera.busy = false; });
+            else if (camera) camera.busy = false;
+          }, 'image/jpeg', 0.4);
+        }, 200);
       };
       ws.onclose = () => stopCamera();
       logLine('已开启本机摄像头');
@@ -417,7 +424,7 @@
     try {
       const resp = await fetch(base + '/v1/dial', { method: 'POST', headers: Object.assign(headers(), { 'Content-Type': 'application/json' }), body: JSON.stringify({ callee_id: id }) });
       if (resp.status === 401) { openSettings('令牌无效'); return; }
-      if (resp.ok) { state.calling = id; render(); startMedia(); startTalk(); startCamera(); logLine('拨号 ' + id); }
+      if (resp.ok) { state.calling = id; render(); startMedia(); startTalk(); logLine('拨号 ' + id); }
       else { const r = await resp.json().catch(() => ({})); toast('拨号失败：' + (r.error || resp.status)); }
     } catch (e) { toast('拨号失败'); }
   };
@@ -425,6 +432,7 @@
     try { await fetch(base + '/v1/dial/hangup', { method: 'POST', headers: headers() }); } catch (e) {}
     state.calling = null; render(); stopMedia(); stopTalk(); stopCamera(); logLine('挂断通话');
   };
+  el.cam.onclick = async () => { if (camera) { stopCamera(); logLine('已关摄像头'); } else { await startCamera(); } render(); };
 
   // ---------- Events (SSE) ----------
   let source = null;
@@ -447,7 +455,7 @@
     source.addEventListener('monitor_started', (e) => { const ev = JSON.parse(e.data); state.monitoring = ev.camera_id; render(); startMedia(); logLine('查看 ' + ev.camera_id); });
     source.addEventListener('monitor_stopped', (e) => { const ev = JSON.parse(e.data); if (state.monitoring) { state.monitoring = null; render(); stopMedia(); } logLine('查看结束（' + ev.reason + '）'); });
     source.addEventListener('elevator_called', () => logLine('电梯已呼叫'));
-    source.addEventListener('dialing', (e) => { const ev = JSON.parse(e.data); state.calling = ev.callee_id; render(); startMedia(); startTalk(); startCamera(); logLine('拨号 ' + ev.callee_id); });
+    source.addEventListener('dialing', (e) => { const ev = JSON.parse(e.data); state.calling = ev.callee_id; render(); startMedia(); startTalk(); logLine('拨号 ' + ev.callee_id); });
     source.addEventListener('call_connected', (e) => { const ev = JSON.parse(e.data); logLine('已接通 ' + ev.callee_id); });
     source.addEventListener('call_hung_up', (e) => { const ev = JSON.parse(e.data); if (state.calling) { state.calling = null; render(); stopMedia(); stopTalk(); stopCamera(); } logLine('通话结束（' + ev.reason + '）'); });
   }
