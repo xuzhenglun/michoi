@@ -246,6 +246,43 @@ enum Tools {
         #[arg(long, default_value_t = 3.0)]
         timeout: f64,
     },
+    /// Dial another station (Pad-to-Pad call): resolve it over UDP 10008, then
+    /// run a two-way call, streaming a camera (frames dir) + mic (PCM file), and
+    /// saving the callee's video/audio.
+    Dial {
+        /// Station id to call.
+        callee_id: String,
+        /// Our own station id (the caller); the callee sees this.
+        #[arg(long, default_value = "S00000000000")]
+        caller_id: String,
+        /// Directory of JPEG frames to send as our camera (optional; audio-only if unset).
+        #[arg(long, value_name = "DIR")]
+        frames: Option<PathBuf>,
+        /// Raw S16LE 8k mono PCM to send as our mic (optional; silence otherwise).
+        #[arg(long, value_name = "FILE")]
+        audio_file: Option<PathBuf>,
+        /// Camera frame rate.
+        #[arg(long, default_value_t = 8)]
+        fps: u16,
+        /// Directory to save the callee's JPEG frames into.
+        #[arg(long, value_name = "DIR", default_value = "call-frames")]
+        out_dir: PathBuf,
+        /// Stop after this many seconds (default: until hangup or Ctrl-C).
+        #[arg(long, value_name = "SECONDS")]
+        seconds: Option<f64>,
+        /// Play the callee's audio through ffplay instead of writing it.
+        #[arg(long)]
+        play: bool,
+        #[arg(long, value_name = "CMD")]
+        player: Option<String>,
+        #[arg(long, value_name = "FILE")]
+        audio_out: Option<PathBuf>,
+        /// Where to broadcast the UDP 10008 discovery query.
+        #[arg(long, default_value = "255.255.255.255")]
+        broadcast: std::net::Ipv4Addr,
+        #[arg(long, default_value_t = 3.0)]
+        discover_timeout: f64,
+    },
     /// Resolve a station's IP from its id over the UDP 10008 discovery
     /// protocol (a private ARP): broadcast a query, read the reply.
     Resolve {
@@ -568,6 +605,63 @@ async fn run_tool(tool: Tools) -> Result<()> {
             if !ok {
                 std::process::exit(1);
             }
+        }
+        Tools::Dial {
+            callee_id,
+            caller_id,
+            frames,
+            audio_file,
+            fps,
+            out_dir,
+            seconds,
+            play,
+            player,
+            audio_out,
+            broadcast,
+            discover_timeout,
+        } => {
+            use michoi::emitter::{resolve_pad, run_outbound_call, MediaSource};
+            use michoi::protocol::Station;
+            let ip =
+                resolve_pad(&callee_id, broadcast, Duration::from_secs_f64(discover_timeout)).await?;
+            println!("{callee_id} -> {ip}");
+            let media = match &frames {
+                Some(dir) => MediaSource::load(dir, audio_file.as_deref())?,
+                None => MediaSource {
+                    frames: Vec::new(),
+                    audio: match &audio_file {
+                        Some(f) => std::fs::read(f)?
+                            .chunks(512)
+                            .map(|c| {
+                                let mut v = c.to_vec();
+                                v.resize(512, 0);
+                                v
+                            })
+                            .collect(),
+                        None => Vec::new(),
+                    },
+                },
+            };
+            let sink = michoi::door_station::AudioSink::open(
+                play,
+                player.as_deref(),
+                audio_out.as_deref(),
+                "call-audio.s16le",
+            )?;
+            let obs = run_outbound_call(
+                Station::new(caller_id, std::net::Ipv4Addr::UNSPECIFIED),
+                Station::new(callee_id, ip),
+                media,
+                fps,
+                seconds.map(Duration::from_secs_f64),
+                Some(out_dir),
+                Some(sink),
+            )
+            .await?;
+            println!(
+                "call: answered={} jpeg_frames={} audio_packets={} hangups={}",
+                obs.answered, obs.jpeg_frames, obs.audio_packets, obs.hangups
+            );
         }
         Tools::Resolve {
             station_id,

@@ -29,6 +29,8 @@ pub const OP_KEEPALIVE: u32 = 0x0c;
 pub const OP_HANGUP: u32 = 0x1e;
 /// Monitor: the door signals its media stream is ready (00b8/0f).
 pub const OP_MONITOR_READY: u32 = 0x0f;
+/// Outbound Pad-to-Pad call setup/invite (00b7/0d).
+pub const OP_CALL_SETUP: u32 = 0x0d;
 
 pub const MEDIA_JPEG: u16 = 1;
 pub const MEDIA_AUDIO: u16 = 3;
@@ -333,6 +335,48 @@ pub fn elevator_request(room_id: &str) -> Result<Vec<u8>, ProtocolError> {
     Ok(packet(FAMILY_ELEVATOR, OP_REQUEST, 32, &body))
 }
 
+/// The fixed capability descriptor in a Pad's outbound `00b7/01` call request
+/// (VIDEOA: voice and video), verbatim from the capture; only the endpoints
+/// vary. A Pad-to-Pad call reuses the session family but, unlike the door ring,
+/// sends no paging.
+pub const CALL_REQUEST_CAPABILITY: [u8; 176] = [
+    0x56, 0x49, 0x44, 0x45, 0x4f, 0x41, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x09, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// A Pad dialling another station: `00b7/01` with the VIDEOA call capability.
+/// The endpoint block is [caller | callee]. Reuse [`jpeg_packets`] /
+/// [`audio_packet`] with `Endpoints { door: caller, room: callee }` for the
+/// call's media, which is ordered the same way.
+pub fn call_request(caller: &Station, callee: &Station) -> Result<Vec<u8>, ProtocolError> {
+    let mut body = caller.pack()?.to_vec();
+    body.extend_from_slice(&callee.pack()?);
+    body.extend_from_slice(&CALL_REQUEST_CAPABILITY);
+    Ok(packet(FAMILY_SESSION, OP_REQUEST, 256, &body))
+}
+
+/// The `00b7/0d` call setup/invite a Pad sends when dialling: [caller | callee]
+/// plus a 2-byte trailer (`01 00`).
+pub fn call_setup(caller: &Station, callee: &Station) -> Result<Vec<u8>, ProtocolError> {
+    let mut body = caller.pack()?.to_vec();
+    body.extend_from_slice(&callee.pack()?);
+    body.extend_from_slice(&[0x01, 0x00]);
+    Ok(packet(FAMILY_SESSION, OP_CALL_SETUP, 82, &body))
+}
+
 pub fn bootstrap_reply(room: &Station) -> Result<Vec<u8>, ProtocolError> {
     let mut body = Vec::with_capacity(866);
     body.extend_from_slice(&[1, 0]);
@@ -557,6 +601,23 @@ mod builder_tests {
             }
         }
         None
+    }
+
+    #[test]
+    fn call_request_and_setup_reproduce_the_captured_dial() {
+        // Outbound Pad-to-Pad call; capture is private and not in git.
+        let Some(req) = captured_in("testdata/call.cap", FAMILY_SESSION, OP_REQUEST) else {
+            eprintln!("skipped: testdata/call.cap is not present");
+            return;
+        };
+        let caller = Station::parse(&req[32..56]).unwrap();
+        let callee = Station::parse(&req[56..80]).unwrap();
+        assert_eq!(call_request(&caller, &callee).unwrap(), req);
+        if let Some(setup) = captured_in("testdata/call.cap", FAMILY_SESSION, OP_CALL_SETUP) {
+            let c = Station::parse(&setup[32..56]).unwrap();
+            let e = Station::parse(&setup[56..80]).unwrap();
+            assert_eq!(call_setup(&c, &e).unwrap(), setup);
+        }
     }
 
     #[test]

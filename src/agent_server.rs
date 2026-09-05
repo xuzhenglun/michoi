@@ -523,6 +523,7 @@ async fn route<A: AgentControl + AgentMedia>(
                         "cameras".into(),
                         "monitor".into(),
                         "elevator".into(),
+                        "dial".into(),
                     ],
                 },
             ),
@@ -554,6 +555,8 @@ async fn route<A: AgentControl + AgentMedia>(
         },
         ("POST", "/v1/monitor") => monitor_start(request, agent).await,
         ("POST", "/v1/monitor/stop") => monitor_stop(request, agent).await,
+        ("POST", "/v1/dial") => dial(request, agent).await,
+        ("POST", "/v1/dial/hangup") => dial_hangup(request, agent).await,
         ("POST", "/v1/elevator") => elevator(request, agent).await,
         ("POST", "/v1/call/claim") => command(request, agent, CallAction::Claim).await,
         ("POST", "/v1/call/unlock") => command(request, agent, CallAction::Unlock).await,
@@ -622,6 +625,41 @@ async fn monitor_stop<A: AgentControl>(request: &Request, agent: &A) -> Response
     match agent.stop_monitor().await {
         Ok(()) => Response::json(200, &serde_json::json!({"ok": true})),
         Err(error) => Response::error(error.http_status(), "monitor_failed", error.to_string()),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct DialRequest {
+    callee_id: String,
+}
+
+async fn dial<A: AgentControl>(request: &Request, agent: &A) -> Response {
+    if let Err(response) = require_accept(request, &[MEDIA_TYPE_JSON]) {
+        return response;
+    }
+    if let Err(response) = require_content_type(request, MEDIA_TYPE_JSON) {
+        return response;
+    }
+    let body: DialRequest = match serde_json::from_slice(&request.body) {
+        Ok(body) => body,
+        Err(error) => return Response::error(400, "bad_request", format!("invalid body: {error}")),
+    };
+    if body.callee_id.is_empty() || body.callee_id.len() > 34 {
+        return Response::error(400, "bad_request", "callee_id must be 1..34 characters");
+    }
+    match agent.dial(&body.callee_id).await {
+        Ok(()) => Response::json(200, &serde_json::json!({"ok": true, "callee_id": body.callee_id})),
+        Err(error) => Response::error(error.http_status(), "dial_failed", error.to_string()),
+    }
+}
+
+async fn dial_hangup<A: AgentControl>(request: &Request, agent: &A) -> Response {
+    if let Err(response) = require_accept(request, &[MEDIA_TYPE_JSON]) {
+        return response;
+    }
+    match agent.hangup_call().await {
+        Ok(()) => Response::json(200, &serde_json::json!({"ok": true})),
+        Err(error) => Response::error(error.http_status(), "dial_failed", error.to_string()),
     }
 }
 

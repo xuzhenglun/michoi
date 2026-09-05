@@ -20,9 +20,10 @@ use tokio::net::UdpSocket;
 use std::path::PathBuf;
 
 use crate::protocol::{
-    audio_packet, elevator_request, jpeg_packets, monitor_request, packet, session_control,
-    split_coalesced, Endpoints, JpegReassembler, Message, Station, FAMILY_ELEVATOR, FAMILY_MONITOR,
-    FAMILY_SESSION, MEDIA_AUDIO, OP_ANSWER, OP_HANGUP, OP_KEEPALIVE, OP_MEDIA, OP_REPLY, OP_REQUEST, OP_UNLOCK,
+    audio_packet, call_request, call_setup, elevator_request, jpeg_packets, monitor_request, packet,
+    session_control, split_coalesced, Endpoints, JpegReassembler, Message, Station, FAMILY_BOOTSTRAP,
+    FAMILY_ELEVATOR, FAMILY_MONITOR, FAMILY_SESSION, MEDIA_AUDIO, OP_ANSWER, OP_HANGUP,
+    OP_KEEPALIVE, OP_MEDIA, OP_REPLY, OP_REQUEST, OP_UNLOCK,
 };
 
 use crate::door_station::AudioSink;
@@ -565,6 +566,147 @@ pub async fn request_elevator(
             }
         }
     }
+}
+
+/// What an outbound call saw coming back from the callee.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CallObservation {
+    pub answered: bool,
+    pub jpeg_frames: u64,
+    pub audio_packets: u64,
+    pub hangups: u64,
+}
+
+/// Dial `callee` as a Pad and run a two-way call: send the bootstrap + setup +
+/// call request, then stream our camera/mic and take in the callee's video and
+/// audio. Unlike the door ring there is no paging; unlike monitor it is
+/// symmetric (we send media too). Media is held until the callee answers
+/// (00b7/05). Runs until a hangup, `duration`, or the future is dropped.
+pub async fn run_outbound_call(
+    caller: Station,
+    callee: Station,
+    media: MediaSource,
+    fps: u16,
+    duration: Option<Duration>,
+    frames_out: Option<PathBuf>,
+    sink: Option<AudioSink>,
+) -> Result<CallObservation> {
+    let mut caller = caller;
+    let dest = SocketAddr::new(callee.ip.into(), crate::protocol::CONTROL_PORT);
+    let bind = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), crate::protocol::CONTROL_PORT);
+    let socket = match UdpSocket::bind(bind).await {
+        Ok(s) => s,
+        Err(_) => UdpSocket::bind(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)).await?,
+    };
+    socket.connect(dest).await.with_context(|| format!("connecting to {dest}"))?;
+    if caller.ip.is_unspecified() {
+        if let std::net::IpAddr::V4(local) = socket.local_addr()?.ip() {
+            caller.ip = local;
+        }
+    }
+    if let Some(dir) = &frames_out {
+        std::fs::create_dir_all(dir)?;
+    }
+    // The call endpoint block is [caller | callee]; jpeg_packets / audio_packet
+    // / session_control all pack door-first, so map door=caller, room=callee.
+    let endpoints = Endpoints { door: caller.clone(), room: callee.clone() };
+    let socket = Arc::new(socket);
+    tracing::info!(%dest, us = %caller.id, callee = %callee.id, "dialing (Pad-to-Pad call)");
+
+    let obs = Arc::new(std::sync::Mutex::new(CallObservation::default()));
+    let recv_socket = socket.clone();
+    let recv_obs = obs.clone();
+    let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+    let mut speaker = sink;
+    let receiver = tokio::spawn(async move {
+        let mut buf = vec![0_u8; 65_536];
+        let mut jpeg = JpegReassembler::default();
+        loop {
+            let Ok(size) = recv_socket.recv(&mut buf).await else { break };
+            for raw in split_coalesced(&buf[..size]) {
+                crate::protocol::trace_packet("rx call", raw);
+                let Ok(msg) = Message::parse(raw) else { continue };
+                if msg.family != FAMILY_SESSION { continue; }
+                match msg.opcode {
+                    OP_ANSWER => {
+                        let mut o = recv_obs.lock().unwrap();
+                        if !o.answered { o.answered = true; tracing::info!("callee answered (00b7/05)"); }
+                    }
+                    OP_HANGUP => {
+                        recv_obs.lock().unwrap().hangups += 1;
+                        tracing::info!("callee hung up (00b7/1e)");
+                        let _ = stop_tx.send(true);
+                    }
+                    OP_MEDIA => {
+                        let Some(m) = msg.media() else { continue };
+                        if m.media_type == MEDIA_AUDIO {
+                            recv_obs.lock().unwrap().audio_packets += 1;
+                            if let Some(sp) = speaker.as_mut() { let _ = sp.write(m.data); }
+                        } else if let Some(frame) = jpeg.push(&m) {
+                            let n = { let mut o = recv_obs.lock().unwrap(); o.jpeg_frames += 1; o.jpeg_frames };
+                            if let Some(dir) = &frames_out {
+                                let _ = std::fs::write(dir.join(format!("frame-{n:04}.jpg")), &frame);
+                            }
+                            if n == 1 { tracing::info!("first video frame from callee"); }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    // Setup: bootstrap (declared 32), call setup (0d), call request (00b7/01) x3.
+    let _ = socket.send(&packet(FAMILY_BOOTSTRAP, OP_REQUEST, 32, &[])).await;
+    let setup = call_setup(&caller, &callee)?;
+    crate::protocol::trace_packet("tx call", &setup);
+    let _ = socket.send(&setup).await;
+    let req = call_request(&caller, &callee)?;
+    for _ in 0..3 {
+        crate::protocol::trace_packet("tx call", &req);
+        let _ = socket.send(&req).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+
+    let frame_gap = Duration::from_micros(1_000_000 / fps.max(1) as u64);
+    let mut frame_at = tokio::time::interval(frame_gap);
+    let mut audio_at = tokio::time::interval(Duration::from_millis(32));
+    let mut keepalive_at = tokio::time::interval(Duration::from_secs(1));
+    let deadline = duration.map(|d| tokio::time::Instant::now() + d);
+    let (mut fi, mut ai, mut seq, mut aseq) = (0usize, 0usize, 1u16, 0u16);
+    let silence = vec![0u8; 512];
+    loop {
+        if *stop_rx.borrow() { break; }
+        if let Some(dl) = deadline { if tokio::time::Instant::now() >= dl { break; } }
+        tokio::select! {
+            _ = frame_at.tick() => {
+                if obs.lock().unwrap().answered && !media.frames.is_empty() {
+                    let frame = &media.frames[fi % media.frames.len()]; fi += 1;
+                    if let Ok(pkts) = jpeg_packets(seq, frame, &endpoints) {
+                        for p in pkts { let _ = socket.send(&p).await; }
+                    }
+                    seq = seq.wrapping_add(1);
+                }
+            }
+            _ = audio_at.tick() => {
+                if !obs.lock().unwrap().answered { continue; }
+                let pcm = if media.audio.is_empty() { &silence } else { let c = &media.audio[ai % media.audio.len()]; ai += 1; c };
+                if let Ok(p) = audio_packet(aseq, pcm, &endpoints) { let _ = socket.send(&p).await; }
+                aseq = aseq.wrapping_add(1);
+            }
+            _ = keepalive_at.tick() => {
+                if let Ok(p) = session_control(OP_KEEPALIVE, &endpoints) {
+                    crate::protocol::trace_packet("tx call", &p);
+                    let _ = socket.send(&p).await;
+                }
+            }
+            _ = stop_rx.changed() => {}
+        }
+    }
+    if let Ok(p) = session_control(OP_HANGUP, &endpoints) { let _ = socket.send(&p).await; }
+    receiver.abort();
+    let o = obs.lock().unwrap().clone();
+    Ok(o)
 }
 
 #[cfg(test)]

@@ -17,12 +17,13 @@
 //! (trust on first use).
 
 use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use futures_util::{future::BoxFuture, FutureExt};
+use tokio::net::UdpSocket;
 use tokio::sync::broadcast;
 
 use crate::agent_api::{
@@ -130,6 +131,8 @@ pub struct Agent {
     monitor_frames: AtomicU32,
     /// The active monitor session, if any (its cancel signal + camera id).
     monitor: Mutex<Option<MonitorHandle>>,
+    /// The active outbound call, if any.
+    call_session: Mutex<Option<CallHandle>>,
     /// A weak handle to self, so &self methods can spawn tasks needing Arc.
     me: std::sync::Weak<Self>,
 }
@@ -137,6 +140,16 @@ pub struct Agent {
 struct MonitorHandle {
     camera: crate::protocol::Station,
     cancel: tokio::sync::watch::Sender<bool>,
+}
+
+/// An active outbound Pad-to-Pad call.
+struct CallHandle {
+    callee: crate::protocol::Station,
+    endpoints: Endpoints,
+    socket: Arc<UdpSocket>,
+    cancel: tokio::sync::watch::Sender<bool>,
+    answered: Arc<AtomicBool>,
+    aseq: AtomicU32,
 }
 
 impl Agent {
@@ -184,6 +197,7 @@ impl Agent {
             elevator_acks: Mutex::new(Vec::new()),
             monitor_frames: AtomicU32::new(0),
             monitor: Mutex::new(None),
+            call_session: Mutex::new(None),
         })
     }
 
@@ -587,6 +601,39 @@ impl Agent {
                 _ => return, // swallow monitor control (03/0f/0c)
             }
         }
+        // An outbound call in progress: the callee's answer/media/hangup arrive
+        // on the wire; feed them without the incoming-call pinning.
+        if self.call_callee().is_some() && message.is_session_like() {
+            match message.opcode {
+                OP_ANSWER => {
+                    if let Some(c) = self.call_session.lock().unwrap().as_ref() {
+                        if !c.answered.swap(true, Ordering::Relaxed) {
+                            self.events.push(EventKind::CallConnected {
+                                callee_id: c.callee.id.clone(),
+                            });
+                            tracing::info!(callee = %c.callee.id, "call connected");
+                        }
+                    }
+                    return;
+                }
+                OP_MEDIA => {
+                    if let Some(media) = message.media() {
+                        let pts_us = self.started.elapsed().as_micros() as u64;
+                        if media.media_type == MEDIA_AUDIO {
+                            self.push_audio(AudioChunk { pts_us, pcm: Arc::from(media.data) });
+                        } else if let Some(frame) = self.jpeg.lock().unwrap().push(&media) {
+                            self.push_video(VideoFrame { pts_us, jpeg: Arc::from(frame.as_slice()) });
+                        }
+                    }
+                    return;
+                }
+                OP_HANGUP => {
+                    self.hangup_call_now("callee_hangup");
+                    return;
+                }
+                _ => return,
+            }
+        }
         if message.family == FAMILY_ELEVATOR && message.opcode != OP_REQUEST {
             for tx in self.elevator_acks.lock().unwrap().drain(..) {
                 let _ = tx.send(());
@@ -794,6 +841,100 @@ impl Agent {
     }
 }
 
+impl Agent {
+    fn call_callee(&self) -> Option<crate::protocol::Station> {
+        self.call_session.lock().unwrap().as_ref().map(|c| c.callee.clone())
+    }
+
+    async fn dial_now(self: &Arc<Self>, callee_id: &str) -> Result<(), CallError> {
+        if self.call.lock().unwrap().machine.state().phase != CallPhase::Idle {
+            return Err(CallError::PadOwnsCall);
+        }
+        if self.monitor.lock().unwrap().is_some() || self.call_session.lock().unwrap().is_some() {
+            return Err(CallError::PadOwnsCall);
+        }
+        let ip = self
+            .discovery
+            .resolve(callee_id, self.broadcast, self.discover_timeout)
+            .await
+            .ok_or(CallError::AgentOffline)?;
+        let dest = std::net::SocketAddr::new(ip.into(), crate::protocol::CONTROL_PORT);
+        let socket = Arc::new(
+            UdpSocket::bind("0.0.0.0:0")
+                .await
+                .map_err(|_| CallError::AgentOffline)?,
+        );
+        socket.connect(dest).await.map_err(|_| CallError::AgentOffline)?;
+        let caller_ip = match socket.local_addr().map(|a| a.ip()) {
+            Ok(std::net::IpAddr::V4(ip)) => ip,
+            _ => Ipv4Addr::UNSPECIFIED,
+        };
+        let us = crate::protocol::Station::new(self.peers.lock().unwrap().room.id.clone(), caller_ip);
+        let callee = crate::protocol::Station::new(callee_id.to_owned(), ip);
+        let endpoints = Endpoints { door: us.clone(), room: callee.clone() };
+        // Setup: bootstrap (declared 32), call setup (0d), request (00b7/01) x3.
+        let _ = socket.send(&crate::protocol::packet(FAMILY_BOOTSTRAP, OP_REQUEST, 32, &[])).await;
+        if let Ok(setup) = crate::protocol::call_setup(&us, &callee) {
+            crate::protocol::trace_packet("tx call", &setup);
+            let _ = socket.send(&setup).await;
+        }
+        if let Ok(req) = crate::protocol::call_request(&us, &callee) {
+            for _ in 0..3 {
+                crate::protocol::trace_packet("tx call", &req);
+                let _ = socket.send(&req).await;
+            }
+        }
+        let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+        let answered = Arc::new(AtomicBool::new(false));
+        *self.call_session.lock().unwrap() = Some(CallHandle {
+            callee: callee.clone(),
+            endpoints: endpoints.clone(),
+            socket: socket.clone(),
+            cancel: cancel_tx,
+            answered: answered.clone(),
+            aseq: AtomicU32::new(0),
+        });
+        self.events.push(EventKind::Dialing { callee_id: callee_id.to_owned() });
+        tracing::info!(callee = %callee_id, %dest, "dialing");
+        // Keepalive until cancelled; the callee's media/answer arrive on the
+        // wire (well-known port) and are handled in on_wire.
+        let ka_socket = socket.clone();
+        let ka_ep = endpoints.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                tokio::select! {
+                    changed = cancel_rx.changed() => {
+                        if changed.is_err() || *cancel_rx.borrow() {
+                            if let Ok(bye) = session_control(OP_HANGUP, &ka_ep) {
+                                let _ = ka_socket.send(&bye).await;
+                            }
+                            return;
+                        }
+                    }
+                    _ = tick.tick() => {
+                        if let Ok(ka) = session_control(OP_KEEPALIVE, &ka_ep) {
+                            crate::protocol::trace_packet("tx call", &ka);
+                            let _ = ka_socket.send(&ka).await;
+                        }
+                    }
+                }
+            }
+        });
+        Ok(())
+    }
+
+    fn hangup_call_now(&self, reason: &str) -> Option<String> {
+        let handle = self.call_session.lock().unwrap().take()?;
+        let _ = handle.cancel.send(true);
+        self.events.push(EventKind::CallHungUp {
+            callee_id: handle.callee.id.clone(),
+            reason: reason.to_owned(),
+        });
+        Some(handle.callee.id)
+    }
+}
+
 impl AgentControl for Agent {
     fn agent_id(&self) -> String {
         Agent::agent_id(self)
@@ -858,6 +999,27 @@ impl AgentControl for Agent {
             }
         })
     }
+
+    fn dial(&self, callee_id: &str) -> BoxFuture<'_, Result<(), CallError>> {
+        let callee_id = callee_id.to_owned();
+        let this = self.me.upgrade();
+        Box::pin(async move {
+            match this {
+                Some(agent) => agent.dial_now(&callee_id).await,
+                None => Err(CallError::AgentOffline),
+            }
+        })
+    }
+
+    fn hangup_call(&self) -> BoxFuture<'_, Result<(), CallError>> {
+        let ended = self.hangup_call_now("local_hangup");
+        Box::pin(async move {
+            match ended {
+                Some(_) => Ok(()),
+                None => Err(CallError::NoCall),
+            }
+        })
+    }
 }
 
 impl AgentMedia for Agent {
@@ -906,6 +1068,30 @@ impl AgentMedia for Agent {
     }
 
     fn talk(&self, chunk: AudioChunk) -> BoxFuture<'_, Result<(), CallError>> {
+        // During an outbound call, our mic goes to the callee over the call's
+        // own socket.
+        {
+            let call = self.call_session.lock().unwrap();
+            if let Some(c) = call.as_ref() {
+                let mut out = Vec::new();
+                for frame in chunk.pcm.chunks(512) {
+                    let mut pcm = frame.to_vec();
+                    pcm.resize(512, 0);
+                    let seq = c.aseq.fetch_add(1, Ordering::Relaxed) as u16;
+                    if let Ok(p) = audio_packet(seq, &pcm, &c.endpoints) {
+                        out.push(p);
+                    }
+                }
+                let socket = c.socket.clone();
+                drop(call);
+                return Box::pin(async move {
+                    for p in out {
+                        let _ = socket.send(&p).await;
+                    }
+                    Ok(())
+                });
+            }
+        }
         let result = (|| {
             let allowed = {
                 let call = self.call.lock().unwrap();

@@ -84,6 +84,16 @@ pub enum EventKind {
     ElevatorCalled {
         room_id: String,
     },
+    Dialing {
+        callee_id: String,
+    },
+    CallConnected {
+        callee_id: String,
+    },
+    CallHungUp {
+        callee_id: String,
+        reason: String,
+    },
 }
 
 impl EventKind {
@@ -99,6 +109,9 @@ impl EventKind {
             Self::MonitorStarted { .. } => "monitor_started",
             Self::MonitorStopped { .. } => "monitor_stopped",
             Self::ElevatorCalled { .. } => "elevator_called",
+            Self::Dialing { .. } => "dialing",
+            Self::CallConnected { .. } => "call_connected",
+            Self::CallHungUp { .. } => "call_hung_up",
         }
     }
 }
@@ -300,6 +313,17 @@ pub trait AgentControl: Send + Sync + 'static {
 
     /// Stop the active monitor.
     fn stop_monitor(&self) -> BoxFuture<'_, Result<(), CallError>> {
+        Box::pin(async { Err(CallError::Unsupported) })
+    }
+
+    /// Dial another station (Pad-to-Pad call). The callee's video/audio then
+    /// appear on the media routes; `talk` sends our mic to them.
+    fn dial(&self, _callee_id: &str) -> BoxFuture<'_, Result<(), CallError>> {
+        Box::pin(async { Err(CallError::Unsupported) })
+    }
+
+    /// Hang up the active outbound call.
+    fn hangup_call(&self) -> BoxFuture<'_, Result<(), CallError>> {
         Box::pin(async { Err(CallError::Unsupported) })
     }
 }

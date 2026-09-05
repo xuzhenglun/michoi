@@ -103,7 +103,7 @@
 .extras .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center}
 .mini{padding:8px 14px;border-radius:10px;border:1px solid #d0d0d5;background:#fff;color:#222;font-size:14px;cursor:pointer}
 .mini:disabled{opacity:.45;cursor:default}
-.extras select{padding:8px 10px;border-radius:10px;border:1px solid #d0d0d5;background:#fff;font-size:14px}
+.extras select,.extras input{padding:8px 10px;border-radius:10px;border:1px solid #d0d0d5;background:#fff;font-size:14px}
 @media (prefers-color-scheme: dark){.mini,.extras select{background:#1c1c22;color:#eee;border-color:#333}}
 </style>
 </head>
@@ -153,6 +153,11 @@
       <button class="mini" id="viewBtn" disabled>查看</button>
       <button class="mini" id="viewStopBtn" hidden>停止查看</button>
     </div>
+    <div class="row">
+      <input id="dialInput" placeholder="拨号：对方设备号" autocomplete="off">
+      <button class="mini" id="dialBtn" disabled>拨号</button>
+      <button class="mini" id="dialHangupBtn" hidden>挂断通话</button>
+    </div>
   </section>
 
   <section class="log" id="log"></section>
@@ -181,6 +186,7 @@
     answer: $('answerBtn'), unlock: $('unlockBtn'), hangup: $('hangupBtn'), talk: $('talkBtn'), talkLabel: $('talkLabel'),
     log: $('log'), toast: $('toast'), settings: $('settings'), tokenInput: $('tokenInput'), soundWave: $('soundWave'),
     elevator: $('elevatorBtn'), cameraSelect: $('cameraSelect'), view: $('viewBtn'), viewStop: $('viewStopBtn'),
+    dialInput: $('dialInput'), dial: $('dialBtn'), dialHangup: $('dialHangupBtn'),
   };
   const base = location.origin;
   const withToken = (path) => base + path + (state.token ? (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(state.token) : '');
@@ -213,6 +219,8 @@
     el.elevator.disabled = !state.online;
     el.view.disabled = !(state.online && !state.monitoring && el.cameraSelect.value !== '');
     el.viewStop.hidden = !state.monitoring;
+    el.dial.disabled = !(state.online && !state.calling && el.dialInput.value.trim() !== '');
+    el.dialHangup.hidden = !state.calling;
     document.title = ringing ? '🔔 门口有人呼叫' : '门口机';
   }
 
@@ -358,6 +366,22 @@
     state.monitoring = null; render(); stopMedia(); logLine('停止查看');
   };
 
+  // ---------- Outbound call (dial) ----------
+  el.dialInput.oninput = render;
+  el.dial.onclick = async () => {
+    const callee_id = el.dialInput.value.trim(); if (!callee_id) return;
+    try {
+      const resp = await fetch(base + '/v1/dial', { method: 'POST', headers: Object.assign(headers(), { 'Content-Type': 'application/json' }), body: JSON.stringify({ callee_id }) });
+      if (resp.status === 401) { openSettings('令牌无效'); return; }
+      if (resp.ok) { state.calling = callee_id; render(); startMedia(); logLine('拨号 ' + callee_id); }
+      else { const r = await resp.json().catch(() => ({})); toast('拨号失败：' + (r.error || resp.status)); }
+    } catch (e) { toast('拨号失败'); }
+  };
+  el.dialHangup.onclick = async () => {
+    try { await fetch(base + '/v1/dial/hangup', { method: 'POST', headers: headers() }); } catch (e) {}
+    state.calling = null; render(); stopMedia(); stopTalk(); logLine('挂断通话');
+  };
+
   // ---------- Events (SSE) ----------
   let source = null;
   function applyState(s) {
@@ -379,6 +403,9 @@
     source.addEventListener('monitor_started', (e) => { const ev = JSON.parse(e.data); state.monitoring = ev.camera_id; render(); startMedia(); logLine('查看 ' + ev.camera_id); });
     source.addEventListener('monitor_stopped', (e) => { const ev = JSON.parse(e.data); if (state.monitoring) { state.monitoring = null; render(); stopMedia(); } logLine('查看结束（' + ev.reason + '）'); });
     source.addEventListener('elevator_called', () => logLine('电梯已呼叫'));
+    source.addEventListener('dialing', (e) => { const ev = JSON.parse(e.data); state.calling = ev.callee_id; render(); startMedia(); logLine('拨号 ' + ev.callee_id); });
+    source.addEventListener('call_connected', (e) => { const ev = JSON.parse(e.data); logLine('已接通 ' + ev.callee_id); });
+    source.addEventListener('call_hung_up', (e) => { const ev = JSON.parse(e.data); if (state.calling) { state.calling = null; render(); stopMedia(); stopTalk(); } logLine('通话结束（' + ev.reason + '）'); });
   }
   async function probe() {
     try {

@@ -307,6 +307,58 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "406": { $ref: "#/components/responses/NotAcceptable" }
 
+  /v1/dial:
+    post:
+      tags: [call]
+      summary: Dial another station (Pad-to-Pad call)
+      description: |
+        Place an outbound voice+video call to a station by id (resolved over
+        UDP 10008). The callee's video and audio then appear on the media
+        routes; `POST /v1/talk` (or the talk WebSocket) sends our mic to them.
+        `dialing` / `call_connected` / `call_hung_up` events are emitted. Only
+        the Pad-side Agent supports this (501 otherwise).
+      operationId: dial
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [callee_id]
+              properties:
+                callee_id: { type: string, description: Station id to call }
+      responses:
+        "200":
+          description: Call started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { ok: { type: boolean }, callee_id: { type: string } }
+        "409": { $ref: "#/components/responses/CommandRejected" }
+        "501": { description: Not supported in this mode }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "406": { $ref: "#/components/responses/NotAcceptable" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+
+  /v1/dial/hangup:
+    post:
+      tags: [call]
+      summary: Hang up the active outbound call
+      operationId: dialHangup
+      responses:
+        "200":
+          description: Call ended
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { ok: { type: boolean } }
+        "409": { description: No outbound call is active }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "406": { $ref: "#/components/responses/NotAcceptable" }
+
   /v1/elevator:
     post:
       tags: [elevator]
