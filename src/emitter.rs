@@ -508,6 +508,23 @@ pub async fn run_monitor(
 /// Call the elevator to the requesting room's floor: send `0106/01` to the
 /// door station and wait for its `0106/02` acknowledgement. Returns whether the
 /// ack arrived within `timeout`.
+/// Send a `0106/01` elevator call and return immediately (fire and forget).
+/// The ack is observed elsewhere (the Agent watches its wire). Sources from the
+/// control port like a real Pad, falling back to an ephemeral port.
+pub async fn send_elevator(room_id: &str, target: SocketAddr) -> Result<()> {
+    let bind = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), crate::protocol::CONTROL_PORT);
+    let socket = match UdpSocket::bind(bind).await {
+        Ok(socket) => socket,
+        Err(_) => UdpSocket::bind(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)).await?,
+    };
+    socket.connect(target).await.with_context(|| format!("connecting to {target}"))?;
+    let req = elevator_request(room_id)?;
+    crate::protocol::trace_packet("tx elevator", &req);
+    socket.send(&req).await.context("sending elevator call")?;
+    tracing::info!(%target, room_id, "elevator: call sent (0106/01)");
+    Ok(())
+}
+
 pub async fn request_elevator(
     room_id: &str,
     target: SocketAddr,

@@ -32,12 +32,11 @@ use crate::agent_api::{
 };
 use crate::agent_server::ServerConfig;
 use crate::config::{AgentMode, IntercomConfig};
-use crate::emitter::resolve_pad;
 use crate::ethernet::MacAddress;
 use crate::protocol::{
     audio_packet, bootstrap_reply, session_control, session_reply, split_coalesced, Endpoints,
     JpegReassembler, Message, Station, FAMILY_BOOTSTRAP, FAMILY_SESSION, MEDIA_AUDIO, OP_ANSWER,
-    OP_HANGUP, OP_KEEPALIVE, OP_MEDIA, OP_REQUEST, OP_UNLOCK,
+    OP_HANGUP, OP_KEEPALIVE, OP_MEDIA, OP_REQUEST, OP_UNLOCK, FAMILY_ELEVATOR,
 };
 use crate::state::{CallMachine, CallPhase};
 
@@ -121,6 +120,12 @@ pub struct Agent {
     discover_timeout: Duration,
     /// Station id of the door that fronts the elevator (resolved on demand).
     elevator_door: Option<String>,
+    /// Shared UDP 10008 endpoint for resolving station ids (and answering
+    /// queries for our own id in pad mode).
+    discovery: Arc<crate::discovery::DiscoveryService>,
+    /// Pending elevator-ack waiters, completed by on_wire when 0106/02 is seen
+    /// (on the wire socket in pad mode, or the bridge in tap mode).
+    elevator_acks: Mutex<Vec<tokio::sync::oneshot::Sender<()>>>,
     /// The active monitor session, if any (its cancel signal + camera id).
     monitor: Mutex<Option<MonitorHandle>>,
     /// A weak handle to self, so &self methods can spawn tasks needing Arc.
@@ -145,6 +150,7 @@ impl Agent {
         broadcast: Ipv4Addr,
         discover_timeout: Duration,
         elevator_door: Option<String>,
+        discovery: Arc<crate::discovery::DiscoveryService>,
     ) -> Arc<Self> {
         let (video, _) = broadcast::channel(32);
         let (audio, _) = broadcast::channel(128);
@@ -172,6 +178,8 @@ impl Agent {
             broadcast,
             discover_timeout,
             elevator_door,
+            discovery,
+            elevator_acks: Mutex::new(Vec::new()),
             monitor: Mutex::new(None),
         })
     }
@@ -185,8 +193,9 @@ impl Agent {
         let timeout = self.discover_timeout.min(Duration::from_secs(2));
         let mut set = tokio::task::JoinSet::new();
         for id in self.roster.clone() {
+            let discovery = self.discovery.clone();
             set.spawn(async move {
-                let ip = crate::emitter::resolve_pad(&id, broadcast, timeout).await.ok();
+                let ip = discovery.resolve(&id, broadcast, timeout).await;
                 CameraInfo {
                     reachable: ip.is_some(),
                     ip: ip.map(|ip| ip.to_string()),
@@ -214,9 +223,7 @@ impl Agent {
         // Prefer the configured elevator door, resolved by discovery; otherwise
         // fall back to a door learned from an incoming call.
         let door_ip = match &self.elevator_door {
-            Some(id) => crate::emitter::resolve_pad(id, self.broadcast, self.discover_timeout)
-                .await
-                .ok(),
+            Some(id) => self.discovery.resolve(id, self.broadcast, self.discover_timeout).await,
             None => self
                 .peers
                 .lock()
@@ -230,15 +237,26 @@ impl Agent {
             None => CommandResult::rejected(command_id, CallError::NoCall),
             Some(ip) => {
                 let target = std::net::SocketAddr::new(ip.into(), crate::protocol::CONTROL_PORT);
-                match crate::emitter::request_elevator(&room_id, target, self.discover_timeout).await
-                {
-                    Ok(true) => {
-                        self.events.push(EventKind::ElevatorCalled {
-                            room_id: room_id.clone(),
-                        });
-                        CommandResult::ok(command_id)
+                // The door's 0106/02 ack lands on the wire (:10000 in pad mode,
+                // the bridge in tap mode), not on a throwaway socket, so wait
+                // for it via on_wire while firing the request separately.
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                self.elevator_acks.lock().unwrap().push(tx);
+                let sent = crate::emitter::send_elevator(&room_id, target).await;
+                match sent {
+                    Ok(()) => {
+                        let acked = tokio::time::timeout(self.discover_timeout, rx).await.is_ok();
+                        if acked {
+                            self.events.push(EventKind::ElevatorCalled {
+                                room_id: room_id.clone(),
+                            });
+                            CommandResult::ok(command_id)
+                        } else {
+                            // Sent but no ack seen (e.g. pad mode where the door
+                            // replies to the physical Pad). Report as such.
+                            CommandResult::rejected(command_id, CallError::AgentOffline)
+                        }
                     }
-                    Ok(false) => CommandResult::rejected(command_id, CallError::AgentOffline),
                     Err(_) => CommandResult::rejected(command_id, CallError::AgentOffline),
                 }
             }
@@ -263,9 +281,11 @@ impl Agent {
         if self.call.lock().unwrap().machine.state().phase != CallPhase::Idle {
             return Err(CallError::PadOwnsCall);
         }
-        let ip = crate::emitter::resolve_pad(camera_id, self.broadcast, self.discover_timeout)
+        let ip = self
+            .discovery
+            .resolve(camera_id, self.broadcast, self.discover_timeout)
             .await
-            .map_err(|_| CallError::AgentOffline)?;
+            .ok_or(CallError::AgentOffline)?;
         // Replace any existing monitor.
         self.stop_monitor_now();
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
@@ -540,6 +560,12 @@ impl Agent {
                         tracing::warn!(%error, "bootstrap reply failed");
                     }
                 }
+            }
+            return;
+        }
+        if message.family == FAMILY_ELEVATOR && message.opcode != OP_REQUEST {
+            for tx in self.elevator_acks.lock().unwrap().drain(..) {
+                let _ = tx.send(());
             }
             return;
         }
@@ -932,6 +958,11 @@ pub async fn run_agent(run: Run) -> Result<()> {
         "intercom.device_id (the Pad's room station id) is required"
     );
     let broadcast = ic.discovery_broadcast()?;
+    // One shared UDP 10008 endpoint: answers "who has <us>" in pad mode and
+    // resolves other ids (cameras, elevator door) for everyone.
+    let answer_id = (ic.mode == AgentMode::Pad).then(|| ic.device_id.clone());
+    let discovery = crate::discovery::DiscoveryService::bind(ic.discovery_port, answer_id).await?;
+    tokio::spawn(discovery.clone().run());
     let mut peers = Peers {
         room: Station::new(ic.device_id.clone(), ic.room_ip.unwrap_or(Ipv4Addr::UNSPECIFIED)),
         door: ic
@@ -946,22 +977,22 @@ pub async fn run_agent(run: Run) -> Result<()> {
 
     // Discovery (the private UDP 10008 "who has this station?").
     if ic.mode == AgentMode::Tap && peers.room.ip.is_unspecified() {
-        match resolve_pad(&ic.device_id, broadcast, run.discover_timeout).await {
-            Ok(ip) => {
+        match discovery.resolve(&ic.device_id, broadcast, run.discover_timeout).await {
+            Some(ip) => {
                 tracing::info!(%ip, id = %ic.device_id, "discovered the physical Pad");
                 peers.room.ip = ip;
             }
-            Err(error) => tracing::warn!(%error, "physical Pad not found by discovery; will learn it from the first call"),
+            None => tracing::warn!("physical Pad not found by discovery; will learn it from the first call"),
         }
     }
     if let Some(door) = peers.door.as_mut() {
         if door.ip.is_unspecified() {
-            match resolve_pad(&door.id, broadcast, run.discover_timeout).await {
-                Ok(ip) => {
+            match discovery.resolve(&door.id, broadcast, run.discover_timeout).await {
+                Some(ip) => {
                     tracing::info!(%ip, id = %door.id, "discovered the door station");
                     door.ip = ip;
                 }
-                Err(error) => tracing::warn!(%error, "door not found by discovery; will learn it from the first call"),
+                None => tracing::warn!("door not found by discovery; will learn it from the first call"),
             }
         }
     }
@@ -980,9 +1011,9 @@ pub async fn run_agent(run: Run) -> Result<()> {
                 run.broadcast,
                 run.discover_timeout,
                 run.elevator_door.clone(),
+                discovery.clone(),
             );
             tokio::spawn(wire.clone().run(agent.clone()));
-            tokio::spawn(crate::wire_udp::discovery_responder(ic.discovery_port, ic.device_id.clone()));
             let keepalive = agent.clone();
             tokio::spawn(async move {
                 let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -1019,6 +1050,7 @@ pub async fn run_agent(run: Run) -> Result<()> {
                     run.broadcast,
                     run.discover_timeout,
                     run.elevator_door.clone(),
+                    discovery.clone(),
                 );
                 let capture = agent.clone();
                 tokio::task::spawn_blocking(move || {

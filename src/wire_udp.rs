@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use tokio::net::UdpSocket;
 
 use crate::agent::{Agent, Peers, Side, Wire};
-use crate::protocol::{discovery_reply, discovery_request_room, split_coalesced};
+use crate::protocol::split_coalesced;
 
 pub struct UdpWire {
     socket: Arc<UdpSocket>,
@@ -93,33 +93,5 @@ fn local_ip_toward(peer: SocketAddr) -> Option<std::net::Ipv4Addr> {
     match probe.local_addr().ok()?.ip() {
         IpAddr::V4(ip) => Some(ip),
         IpAddr::V6(_) => None,
-    }
-}
-
-/// Answer UDP 10008 discovery for our device id so the door can find this Pad.
-/// Best-effort: a bind failure (port taken) is logged and discovery is off.
-pub async fn discovery_responder(port: u16, device_id: String) {
-    let bind = SocketAddr::from(([0, 0, 0, 0], port));
-    let socket = match UdpSocket::bind(bind).await {
-        Ok(socket) => socket,
-        Err(error) => {
-            tracing::warn!(%error, %bind, "discovery responder disabled");
-            return;
-        }
-    };
-    let _ = socket.set_broadcast(true);
-    let Ok(reply) = discovery_reply(&device_id) else {
-        return;
-    };
-    let mut buffer = vec![0_u8; 1024];
-    loop {
-        let Ok((size, from)) = socket.recv_from(&mut buffer).await else {
-            break;
-        };
-        crate::protocol::trace_packet("rx discovery", &buffer[..size]);
-        if discovery_request_room(&buffer[..size]).as_deref() == Some(device_id.as_str()) {
-            crate::protocol::trace_packet("tx discovery", &reply);
-            let _ = socket.send_to(&reply, from).await;
-        }
     }
 }
