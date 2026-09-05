@@ -99,6 +99,12 @@
   dialog button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .hint { font-size: 12px; color: var(--muted); }
   @media (max-width: 520px) { .controls { gap: 8px; } .ctl { padding: 12px 4px; } .ctl .ring { width: 48px; height: 48px; } }
+.extras{display:flex;justify-content:center;margin:8px 0}
+.extras .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:center}
+.mini{padding:8px 14px;border-radius:10px;border:1px solid #d0d0d5;background:#fff;color:#222;font-size:14px;cursor:pointer}
+.mini:disabled{opacity:.45;cursor:default}
+.extras select{padding:8px 10px;border-radius:10px;border:1px solid #d0d0d5;background:#fff;font-size:14px}
+@media (prefers-color-scheme: dark){.mini,.extras select{background:#1c1c22;color:#eee;border-color:#333}}
 </style>
 </head>
 <body>
@@ -140,6 +146,15 @@
     </button>
   </section>
 
+  <section class="extras">
+    <div class="row">
+      <button class="mini" id="elevatorBtn" disabled>叫电梯</button>
+      <select id="cameraSelect" title="选择楼下摄像头"><option value="">摄像头…</option></select>
+      <button class="mini" id="viewBtn" disabled>查看</button>
+      <button class="mini" id="viewStopBtn" hidden>停止查看</button>
+    </div>
+  </section>
+
   <section class="log" id="log"></section>
 </main>
 
@@ -165,6 +180,7 @@
     status: $('status'), statusText: $('statusText'), badge: $('badge'), age: $('age'), video: $('video'),
     answer: $('answerBtn'), unlock: $('unlockBtn'), hangup: $('hangupBtn'), talk: $('talkBtn'), talkLabel: $('talkLabel'),
     log: $('log'), toast: $('toast'), settings: $('settings'), tokenInput: $('tokenInput'), soundWave: $('soundWave'),
+    elevator: $('elevatorBtn'), cameraSelect: $('cameraSelect'), view: $('viewBtn'), viewStop: $('viewStopBtn'),
   };
   const base = location.origin;
   const withToken = (path) => base + path + (state.token ? (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(state.token) : '');
@@ -194,6 +210,9 @@
     el.unlock.disabled = !state.online;
     el.hangup.disabled = !(state.online && (ringing || mine));
     el.talk.disabled = !(state.online && mine);
+    el.elevator.disabled = !state.online;
+    el.view.disabled = !(state.online && !state.monitoring && el.cameraSelect.value !== '');
+    el.viewStop.hidden = !state.monitoring;
     document.title = ringing ? '🔔 门口有人呼叫' : '门口机';
   }
 
@@ -296,6 +315,49 @@
   el.hangup.onclick = async () => { try { await command('hangup'); logLine('已挂断'); } catch (e) {} };
   el.unlock.onclick = async () => { try { await command('unlock'); toast('已开锁'); logLine('已开锁'); } catch (e) {} };
 
+  // ---------- Elevator ----------
+  el.elevator.onclick = async () => {
+    const id = 'pad-' + Date.now() + '-' + (++counter);
+    try {
+      const resp = await fetch(base + '/v1/elevator', { method: 'POST', headers: Object.assign(headers(), { 'Content-Type': 'application/json' }), body: JSON.stringify({ command_id: id }) });
+      if (resp.status === 401) { openSettings('令牌无效'); return; }
+      const r = await resp.json().catch(() => ({}));
+      if (r.ok) { toast('已呼叫电梯'); logLine('已呼叫电梯到本层'); }
+      else { toast('呼叫电梯失败：' + (r.error || resp.status)); }
+    } catch (e) { toast('呼叫电梯失败'); }
+  };
+
+  // ---------- Monitor (view a door camera without a ring) ----------
+  async function loadCameras() {
+    try {
+      const resp = await fetch(base + '/v1/cameras', { headers: headers() });
+      if (!resp.ok) return;
+      const cams = await resp.json();
+      const sel = el.cameraSelect; const prev = sel.value;
+      sel.innerHTML = '<option value="">摄像头…</option>';
+      for (const c of cams) {
+        const o = document.createElement('option');
+        o.value = c.station_id; o.textContent = c.station_id + (c.reachable ? '' : '（离线）'); o.disabled = !c.reachable;
+        sel.appendChild(o);
+      }
+      sel.value = prev; render();
+    } catch (e) {}
+  }
+  el.cameraSelect.onchange = render;
+  el.view.onclick = async () => {
+    const camera_id = el.cameraSelect.value; if (!camera_id) return;
+    try {
+      const resp = await fetch(base + '/v1/monitor', { method: 'POST', headers: Object.assign(headers(), { 'Content-Type': 'application/json' }), body: JSON.stringify({ camera_id }) });
+      if (resp.status === 401) { openSettings('令牌无效'); return; }
+      if (resp.ok) { state.monitoring = camera_id; render(); startMedia(); logLine('查看摄像头 ' + camera_id); }
+      else { const r = await resp.json().catch(() => ({})); toast('查看失败：' + (r.error || resp.status)); }
+    } catch (e) { toast('查看失败'); }
+  };
+  el.viewStop.onclick = async () => {
+    try { await fetch(base + '/v1/monitor/stop', { method: 'POST', headers: headers() }); } catch (e) {}
+    state.monitoring = null; render(); stopMedia(); logLine('停止查看');
+  };
+
   // ---------- Events (SSE) ----------
   let source = null;
   function applyState(s) {
@@ -305,7 +367,7 @@
   function connectEvents() {
     if (source) source.close();
     source = new EventSource(withToken('/v1/events'));
-    source.onopen = () => { state.online = true; render(); };
+    source.onopen = () => { state.online = true; render(); loadCameras(); };
     source.onerror = () => { state.online = false; render(); };
     source.addEventListener('snapshot', (e) => { const ev = JSON.parse(e.data); applyState(ev.state); });
     source.addEventListener('call_started', (e) => { const ev = JSON.parse(e.data); logLine('门口 ' + ev.door_id + ' 呼叫'); state.phase = 'ringing'; state.owner = 'none'; state.online = true; render(); startMedia(); startRing(); });
@@ -314,6 +376,9 @@
     source.addEventListener('unlocked', (e) => { const ev = JSON.parse(e.data); logLine(ev.by === 'remote' ? '已开锁' : '室内机开锁'); });
     source.addEventListener('call_ended', (e) => { const ev = JSON.parse(e.data); logLine('通话结束（' + ev.reason + '）'); state.phase = 'idle'; state.owner = 'none'; render(); stopRing(); stopMedia(); stopTalk(); });
     source.addEventListener('agent_error', (e) => { const ev = JSON.parse(e.data); logLine('Agent 错误：' + ev.message); });
+    source.addEventListener('monitor_started', (e) => { const ev = JSON.parse(e.data); state.monitoring = ev.camera_id; render(); startMedia(); logLine('查看 ' + ev.camera_id); });
+    source.addEventListener('monitor_stopped', (e) => { const ev = JSON.parse(e.data); if (state.monitoring) { state.monitoring = null; render(); stopMedia(); } logLine('查看结束（' + ev.reason + '）'); });
+    source.addEventListener('elevator_called', () => logLine('电梯已呼叫'));
   }
   async function probe() {
     try {

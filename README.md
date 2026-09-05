@@ -24,6 +24,7 @@ The complete evidence-backed wire description is in
 | pcap replay Agent with capture timing (`tools fake-agent`) | implemented |
 | Agent interface (`AgentControl` / `AgentMedia` traits) | implemented; used by the replay Agent, both Agent wire modes, the door station, and the HTTP server |
 | HTTP control plane: REST + SSE, negotiation, bearer auth, Swagger UI | the only backend transport; verified end to end against the replay Agent |
+| Proactive camera monitor (`00b8`) + elevator call (`0106`) over HTTP | implemented (`GET /v1/cameras`, `POST /v1/monitor`, `POST /v1/elevator`); protocol byte-exact, agent path tested against a fake door |
 | Pre-roll media buffer (configurable seconds / bytes) | implemented |
 | RTSP data plane (RTP/JPEG + PCMU, no re-encoding) | designed and validated with the captured frames; **not implemented yet** |
 | Agent `tap` mode: Linux AF_PACKET bridge capture + raw control injection over HTTP | implemented; needs authorized on-device validation |

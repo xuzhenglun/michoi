@@ -313,6 +313,8 @@ async fn main() -> Result<()> {
             }
             cfg.validate()
                 .context("configuration (pass --device-id or a config file)")?;
+            let roster = cfg.intercom.cameras.clone();
+            let broadcast = cfg.intercom.discovery_broadcast()?;
             let run = michoi::agent::Run {
                 server: michoi::agent_server::ServerConfig {
                     listen: cfg.agent.http_listen,
@@ -329,6 +331,8 @@ async fn main() -> Result<()> {
                 history: Duration::from_secs(cfg.media.history_secs),
                 history_max_bytes: (cfg.media.history_max_kib * 1024) as usize,
                 discover_timeout: Duration::from_secs_f64(discover_timeout),
+                roster,
+                broadcast,
             };
             michoi::agent::run_agent(run).await?;
         }

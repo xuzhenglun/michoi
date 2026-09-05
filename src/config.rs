@@ -114,6 +114,9 @@ pub struct IntercomConfig {
     pub pad_mac: Option<String>,
     pub control_port: u16,
     pub discovery_port: u16,
+    /// Door camera station ids offered as viewable cameras (the provisioned
+    /// roster; the protocol has no discovery for these). Empty = none listed.
+    pub cameras: Vec<String>,
 }
 
 impl Default for IntercomConfig {
@@ -133,6 +136,7 @@ impl Default for IntercomConfig {
             pad_mac: None,
             control_port: 10_000,
             discovery_port: 10_008,
+            cameras: Vec::new(),
         }
     }
 }

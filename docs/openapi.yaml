@@ -74,6 +74,8 @@ tags:
   - name: call
   - name: events
   - name: media
+  - name: monitor
+  - name: elevator
 
 paths:
   /v1/:
@@ -225,6 +227,114 @@ paths:
           $ref: "#/components/responses/NotAcceptable"
         "415":
           $ref: "#/components/responses/UnsupportedMediaType"
+
+  /v1/cameras:
+    get:
+      tags: [monitor]
+      summary: List door cameras the Pad may view
+      description: |
+        The provisioned roster (`intercom.cameras`) with each entry's current
+        reachability by UDP 10008 discovery. The protocol has no discovery for
+        these; the list is configured, and only reachable ones can be viewed.
+      operationId: listCameras
+      responses:
+        "200":
+          description: Camera roster
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/CameraInfo" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "406": { $ref: "#/components/responses/NotAcceptable" }
+
+  /v1/monitor:
+    post:
+      tags: [monitor]
+      summary: Start viewing a door camera (no ring)
+      description: |
+        Open a monitor session (family `00b8`, the mirror of an incoming call)
+        to the given camera. Its video and audio then appear on the media
+        routes (`/v1/snapshot.jpg`, `/v1/stream.mjpeg`, `/v1/audio.pcm`) exactly
+        like a call's, and `monitor_started` / `monitor_stopped` events are
+        emitted. Only one monitor runs at a time; a new request replaces it.
+        Blocked while a call is active (`409`).
+      operationId: startMonitor
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [camera_id]
+              properties:
+                camera_id:
+                  type: string
+                  description: A door station id from the roster.
+      responses:
+        "200":
+          description: Monitor started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  camera_id: { type: string }
+        "409": { $ref: "#/components/responses/CommandRejected" }
+        "501":
+          description: Not supported in this mode (only the Pad-side Agent monitors)
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "406": { $ref: "#/components/responses/NotAcceptable" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
+
+  /v1/monitor/stop:
+    post:
+      tags: [monitor]
+      summary: Stop the active monitor
+      operationId: stopMonitor
+      responses:
+        "200":
+          description: Monitor stopped
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { ok: { type: boolean } }
+        "409":
+          description: No monitor is active
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "406": { $ref: "#/components/responses/NotAcceptable" }
+
+  /v1/elevator:
+    post:
+      tags: [elevator]
+      summary: Call the elevator to this Pad's floor
+      description: |
+        Send an elevator call (`0106/01`) to the door station and wait for its
+        acknowledgement. The floor is derived by the controller from the Pad's
+        room station id; the request carries no floor. Idempotent by
+        `command_id`.
+      operationId: callElevator
+      requestBody:
+        $ref: "#/components/requestBodies/Command"
+      responses:
+        "200":
+          $ref: "#/components/responses/CommandOk"
+        "409":
+          $ref: "#/components/responses/CommandRejected"
+        "501":
+          description: Not supported in this mode
+        "503":
+          description: No acknowledgement from the door
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommandResult" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "406": { $ref: "#/components/responses/NotAcceptable" }
+        "415": { $ref: "#/components/responses/UnsupportedMediaType" }
 
   /v1/snapshot.jpg:
     get:
@@ -568,6 +678,13 @@ components:
           type: string
           description: Present on `agent_error`.
 
+    CameraInfo:
+      type: object
+      properties:
+        station_id: { type: string, description: Door camera station id }
+        ip: { type: string, description: Resolved IPv4 when reachable }
+        reachable: { type: boolean }
+      required: [station_id, reachable]
     CommandRequest:
       type: object
       required: [command_id]

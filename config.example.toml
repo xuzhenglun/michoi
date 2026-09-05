@@ -26,6 +26,10 @@ pad_listen = "0.0.0.0:10000"
 # pad_mac = "00:00:00:00:00:3d"
 control_port = 10000
 discovery_port = 10008
+# Door cameras offered for on-demand viewing (the provisioned roster; the
+# protocol has no discovery for these). Reachable ones show video via
+# GET /v1/cameras + POST /v1/monitor. Example entrance doors:
+# cameras = ["M00000000000", "M00000000001", "M00000000002"]
 
 [agent]
 # HTTP control plane (REST + Server-Sent Events), see docs/openapi.yaml.

@@ -74,6 +74,16 @@ pub enum EventKind {
     AgentError {
         message: String,
     },
+    MonitorStarted {
+        camera_id: String,
+    },
+    MonitorStopped {
+        camera_id: String,
+        reason: String,
+    },
+    ElevatorCalled {
+        room_id: String,
+    },
 }
 
 impl EventKind {
@@ -86,6 +96,9 @@ impl EventKind {
             Self::Unlocked { .. } => "unlocked",
             Self::CallEnded { .. } => "call_ended",
             Self::AgentError { .. } => "agent_error",
+            Self::MonitorStarted { .. } => "monitor_started",
+            Self::MonitorStopped { .. } => "monitor_stopped",
+            Self::ElevatorCalled { .. } => "elevator_called",
         }
     }
 }
@@ -121,6 +134,8 @@ pub enum CallError {
     NoCall,
     #[error("the Agent is offline")]
     AgentOffline,
+    #[error("this operation is not supported in this mode")]
+    Unsupported,
 }
 
 impl CallError {
@@ -129,6 +144,7 @@ impl CallError {
         match self {
             Self::UnlockCooldown => 429,
             Self::AgentOffline => 503,
+            Self::Unsupported => 501,
             _ => 409,
         }
     }
@@ -243,7 +259,20 @@ pub struct ApiInfo {
     pub capabilities: Vec<String>,
 }
 
-/// Call control: state, resumable events, idempotent commands.
+/// A door camera the Pad may view (from the provisioned roster), with its
+/// current reachability by UDP 10008 discovery.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CameraInfo {
+    pub station_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip: Option<String>,
+    pub reachable: bool,
+}
+
+/// Call control: state, resumable events, idempotent commands. Monitor,
+/// elevator and camera listing are the Pad's outbound operations; they default
+/// to unsupported so replay / door-station implementations need not provide
+/// them.
 pub trait AgentControl: Send + Sync + 'static {
     fn agent_id(&self) -> String;
     fn state(&self) -> CallState;
@@ -252,6 +281,27 @@ pub trait AgentControl: Send + Sync + 'static {
     /// and the caller must resynchronise from `state()`.
     fn recent(&self, after_seq: u64) -> Option<Vec<Event>>;
     fn command(&self, action: CallAction, command_id: &str) -> BoxFuture<'_, CommandResult>;
+
+    /// The roster of door cameras and whether each answers discovery now.
+    fn cameras(&self) -> BoxFuture<'_, Vec<CameraInfo>> {
+        Box::pin(async { Vec::new() })
+    }
+
+    /// Call the elevator to this Pad's floor.
+    fn call_elevator(&self, _command_id: &str) -> BoxFuture<'_, CommandResult> {
+        Box::pin(async move { CommandResult::rejected("", CallError::Unsupported) })
+    }
+
+    /// Start viewing a door camera (no ring). Its video/audio then appear on
+    /// the media routes just like an incoming call's.
+    fn start_monitor(&self, _camera_id: &str) -> BoxFuture<'_, Result<(), CallError>> {
+        Box::pin(async { Err(CallError::Unsupported) })
+    }
+
+    /// Stop the active monitor.
+    fn stop_monitor(&self) -> BoxFuture<'_, Result<(), CallError>> {
+        Box::pin(async { Err(CallError::Unsupported) })
+    }
 }
 
 /// Media: door video/audio feeds, snapshot, talk-back.

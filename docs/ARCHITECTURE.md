@@ -73,6 +73,10 @@ standalone 部署时 Backend 直接调用 trait（函数调用和 channel，无�
   需增加候选。
 - 鉴权：`Authorization: Bearer <token>`；空 token 关闭鉴权，仅开发用。
 - `/swagger` 由开关控制，页面从 CDN 加载 Swagger UI 读取本机 `/openapi.yaml`。
+- Pad 主动操作(仅 pad/tap 的 Agent):`GET /v1/cameras` 按名单+10008 探测列出可看
+  摄像头;`POST /v1/monitor`/`/v1/monitor/stop` 用 `00b8` 主动查看某门口机,画面走
+  同一媒体路由;`POST /v1/elevator` 发 `0106` 呼叫电梯。replay/door 实现默认返回
+  501 unsupported。
 - 内置网页 Pad（`/`、`/pad`）由 `agent.web_ui` 开关控制，默认开：不部署任何
   Matter/HAP 后端时也有一个跨平台可用的界面；headless 部署可关。它只是控制面的
   一个普通客户端，没有任何特权通道。

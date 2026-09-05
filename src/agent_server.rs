@@ -520,6 +520,9 @@ async fn route<A: AgentControl + AgentMedia>(
                         "talk".into(),
                         "talk-ws".into(),
                         "pad".into(),
+                        "cameras".into(),
+                        "monitor".into(),
+                        "elevator".into(),
                     ],
                 },
             ),
@@ -545,6 +548,13 @@ async fn route<A: AgentControl + AgentMedia>(
             },
             Err(response) => response,
         },
+        ("GET", "/v1/cameras") => match require_accept(request, &[MEDIA_TYPE_JSON]) {
+            Ok(_) => Response::json(200, &agent.cameras().await),
+            Err(response) => response,
+        },
+        ("POST", "/v1/monitor") => monitor_start(request, agent).await,
+        ("POST", "/v1/monitor/stop") => monitor_stop(request, agent).await,
+        ("POST", "/v1/elevator") => elevator(request, agent).await,
         ("POST", "/v1/call/claim") => command(request, agent, CallAction::Claim).await,
         ("POST", "/v1/call/unlock") => command(request, agent, CallAction::Unlock).await,
         ("POST", "/v1/call/hangup") => command(request, agent, CallAction::Hangup).await,
@@ -577,6 +587,59 @@ async fn command<A: AgentControl>(request: &Request, agent: &A, action: CallActi
         return Response::error(400, "bad_request", "command_id must be 1..128 characters");
     }
     let result = agent.command(action, &body.command_id).await;
+    Response::json(result.http_status(), &result)
+}
+
+#[derive(serde::Deserialize)]
+struct MonitorRequest {
+    camera_id: String,
+}
+
+async fn monitor_start<A: AgentControl>(request: &Request, agent: &A) -> Response {
+    if let Err(response) = require_accept(request, &[MEDIA_TYPE_JSON]) {
+        return response;
+    }
+    if let Err(response) = require_content_type(request, MEDIA_TYPE_JSON) {
+        return response;
+    }
+    let body: MonitorRequest = match serde_json::from_slice(&request.body) {
+        Ok(body) => body,
+        Err(error) => return Response::error(400, "bad_request", format!("invalid body: {error}")),
+    };
+    if body.camera_id.is_empty() || body.camera_id.len() > 34 {
+        return Response::error(400, "bad_request", "camera_id must be 1..34 characters");
+    }
+    match agent.start_monitor(&body.camera_id).await {
+        Ok(()) => Response::json(200, &serde_json::json!({"ok": true, "camera_id": body.camera_id})),
+        Err(error) => Response::error(error.http_status(), "monitor_failed", error.to_string()),
+    }
+}
+
+async fn monitor_stop<A: AgentControl>(request: &Request, agent: &A) -> Response {
+    if let Err(response) = require_accept(request, &[MEDIA_TYPE_JSON]) {
+        return response;
+    }
+    match agent.stop_monitor().await {
+        Ok(()) => Response::json(200, &serde_json::json!({"ok": true})),
+        Err(error) => Response::error(error.http_status(), "monitor_failed", error.to_string()),
+    }
+}
+
+async fn elevator<A: AgentControl>(request: &Request, agent: &A) -> Response {
+    if let Err(response) = require_accept(request, &[MEDIA_TYPE_JSON]) {
+        return response;
+    }
+    if let Err(response) = require_content_type(request, MEDIA_TYPE_JSON) {
+        return response;
+    }
+    let body: CommandRequest = match serde_json::from_slice(&request.body) {
+        Ok(body) => body,
+        Err(error) => return Response::error(400, "bad_request", format!("invalid body: {error}")),
+    };
+    if body.command_id.is_empty() || body.command_id.len() > 128 {
+        return Response::error(400, "bad_request", "command_id must be 1..128 characters");
+    }
+    let result = agent.call_elevator(&body.command_id).await;
     Response::json(result.http_status(), &result)
 }
 

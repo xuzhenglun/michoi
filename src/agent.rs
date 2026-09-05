@@ -35,9 +35,9 @@ use crate::config::{AgentMode, IntercomConfig};
 use crate::emitter::resolve_pad;
 use crate::ethernet::MacAddress;
 use crate::protocol::{
-    audio_packet, bootstrap_reply, session_control, session_reply, Endpoints, JpegReassembler,
-    Message, Station, FAMILY_BOOTSTRAP, FAMILY_SESSION, MEDIA_AUDIO, OP_ANSWER, OP_HANGUP,
-    OP_KEEPALIVE, OP_MEDIA, OP_REQUEST, OP_UNLOCK,
+    audio_packet, bootstrap_reply, session_control, session_reply, split_coalesced, Endpoints,
+    JpegReassembler, Message, Station, FAMILY_BOOTSTRAP, FAMILY_SESSION, MEDIA_AUDIO, OP_ANSWER,
+    OP_HANGUP, OP_KEEPALIVE, OP_MEDIA, OP_REQUEST, OP_UNLOCK,
 };
 use crate::state::{CallMachine, CallPhase};
 
@@ -114,9 +114,24 @@ pub struct Agent {
     started: Instant,
     audio_seq: AtomicU32,
     mismatches: AtomicU32,
+    /// Door camera station ids offered as viewable cameras (provisioned).
+    roster: Vec<String>,
+    /// Where UDP 10008 discovery is broadcast (subnet or limited broadcast).
+    broadcast: Ipv4Addr,
+    discover_timeout: Duration,
+    /// The active monitor session, if any (its cancel signal + camera id).
+    monitor: Mutex<Option<MonitorHandle>>,
+    /// A weak handle to self, so &self methods can spawn tasks needing Arc.
+    me: std::sync::Weak<Self>,
+}
+
+struct MonitorHandle {
+    camera_id: String,
+    cancel: tokio::sync::watch::Sender<bool>,
 }
 
 impl Agent {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         mode: AgentMode,
         wire: Arc<dyn Wire>,
@@ -124,10 +139,14 @@ impl Agent {
         policy: Policy,
         history: Duration,
         history_max_bytes: usize,
+        roster: Vec<String>,
+        broadcast: Ipv4Addr,
+        discover_timeout: Duration,
     ) -> Arc<Self> {
         let (video, _) = broadcast::channel(32);
         let (audio, _) = broadcast::channel(128);
-        Arc::new(Self {
+        Arc::new_cyclic(|me| Self {
+            me: me.clone(),
             mode,
             wire,
             peers: Mutex::new(peers),
@@ -146,7 +165,190 @@ impl Agent {
             started: Instant::now(),
             audio_seq: AtomicU32::new(0),
             mismatches: AtomicU32::new(0),
+            roster,
+            broadcast,
+            discover_timeout,
+            monitor: Mutex::new(None),
         })
+    }
+
+    // ------------------------------------------------------- outbound: cameras
+
+    /// Resolve every rostered camera by UDP 10008, concurrently.
+    async fn list_cameras(&self) -> Vec<crate::agent_api::CameraInfo> {
+        use crate::agent_api::CameraInfo;
+        let broadcast = self.broadcast;
+        let timeout = self.discover_timeout.min(Duration::from_secs(2));
+        let mut set = tokio::task::JoinSet::new();
+        for id in self.roster.clone() {
+            set.spawn(async move {
+                let ip = crate::emitter::resolve_pad(&id, broadcast, timeout).await.ok();
+                CameraInfo {
+                    reachable: ip.is_some(),
+                    ip: ip.map(|ip| ip.to_string()),
+                    station_id: id,
+                }
+            });
+        }
+        let mut out = Vec::new();
+        while let Some(res) = set.join_next().await {
+            if let Ok(info) = res {
+                out.push(info);
+            }
+        }
+        out.sort_by(|a, b| a.station_id.cmp(&b.station_id));
+        out
+    }
+
+    // ------------------------------------------------------ outbound: elevator
+
+    async fn call_elevator_now(&self, command_id: &str) -> CommandResult {
+        if let Some(replayed) = self.commands.get(command_id) {
+            return replayed;
+        }
+        let (room_id, door_ip) = {
+            let peers = self.peers.lock().unwrap();
+            (
+                peers.room.id.clone(),
+                peers.door.as_ref().map(|d| d.ip).filter(|ip| !ip.is_unspecified()),
+            )
+        };
+        let result = match door_ip {
+            None => CommandResult::rejected(command_id, CallError::NoCall),
+            Some(ip) => {
+                let target = std::net::SocketAddr::new(ip.into(), crate::protocol::CONTROL_PORT);
+                match crate::emitter::request_elevator(&room_id, target, self.discover_timeout).await
+                {
+                    Ok(true) => {
+                        self.events.push(EventKind::ElevatorCalled {
+                            room_id: room_id.clone(),
+                        });
+                        CommandResult::ok(command_id)
+                    }
+                    Ok(false) => CommandResult::rejected(command_id, CallError::AgentOffline),
+                    Err(_) => CommandResult::rejected(command_id, CallError::AgentOffline),
+                }
+            }
+        };
+        self.commands.store(&result);
+        tracing::info!(command_id, ok = result.ok, "elevator call");
+        result
+    }
+
+    // ------------------------------------------------------- outbound: monitor
+
+    /// Stop any running monitor (sends the cancel signal; the task tears the
+    /// session down and emits MonitorStopped).
+    fn stop_monitor_now(&self) -> Option<String> {
+        let handle = self.monitor.lock().unwrap().take()?;
+        let _ = handle.cancel.send(true);
+        Some(handle.camera_id)
+    }
+
+    async fn start_monitor_now(self: &Arc<Self>, camera_id: &str) -> Result<(), CallError> {
+        // Resolve the door camera; a call in progress blocks monitoring.
+        if self.call.lock().unwrap().machine.state().phase != CallPhase::Idle {
+            return Err(CallError::PadOwnsCall);
+        }
+        let ip = crate::emitter::resolve_pad(camera_id, self.broadcast, self.discover_timeout)
+            .await
+            .map_err(|_| CallError::AgentOffline)?;
+        // Replace any existing monitor.
+        self.stop_monitor_now();
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        *self.monitor.lock().unwrap() = Some(MonitorHandle {
+            camera_id: camera_id.to_owned(),
+            cancel: cancel_tx,
+        });
+        self.events.push(EventKind::MonitorStarted {
+            camera_id: camera_id.to_owned(),
+        });
+        let agent = self.clone();
+        let door = crate::protocol::Station::new(camera_id.to_owned(), ip);
+        tokio::spawn(async move {
+            let reason = agent.run_monitor_session(&door, cancel_rx).await;
+            agent.monitor.lock().unwrap().take();
+            agent.events.push(EventKind::MonitorStopped {
+                camera_id: door.id.clone(),
+                reason: reason.clone(),
+            });
+            tracing::info!(camera = %door.id, reason, "monitor ended");
+        });
+        Ok(())
+    }
+
+    /// Drive a monitor session, pushing the door's video/audio into this
+    /// Agent's media so every media route shows it. Returns the stop reason.
+    async fn run_monitor_session(
+        &self,
+        door: &crate::protocol::Station,
+        mut cancel: tokio::sync::watch::Receiver<bool>,
+    ) -> String {
+        use crate::protocol::{monitor_request, packet, Station, FAMILY_MONITOR, MEDIA_AUDIO};
+        use tokio::net::UdpSocket;
+        let dest = std::net::SocketAddr::new(door.ip.into(), crate::protocol::CONTROL_PORT);
+        let socket = match UdpSocket::bind("0.0.0.0:0").await {
+            Ok(s) => s,
+            Err(_) => return "socket_error".into(),
+        };
+        if socket.connect(dest).await.is_err() {
+            return "connect_error".into();
+        }
+        let us_ip = match socket.local_addr().map(|a| a.ip()) {
+            Ok(std::net::IpAddr::V4(ip)) => ip,
+            _ => Ipv4Addr::UNSPECIFIED,
+        };
+        let us = Station::new(self.peers.lock().unwrap().room.id.clone(), us_ip);
+        let block = {
+            let mut b = match us.pack() {
+                Ok(b) => b.to_vec(),
+                Err(_) => return "pack_error".into(),
+            };
+            match door.pack() {
+                Ok(d) => b.extend_from_slice(&d),
+                Err(_) => return "pack_error".into(),
+            }
+            b
+        };
+        let Ok(request) = monitor_request(&us, door) else {
+            return "build_error".into();
+        };
+        let _ = socket.send(&request).await;
+        let mut jpeg = JpegReassembler::default();
+        let mut buf = vec![0_u8; 65_536];
+        let mut keepalive = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            tokio::select! {
+                changed = cancel.changed() => {
+                    if changed.is_err() || *cancel.borrow() {
+                        let _ = socket.send(&packet(FAMILY_MONITOR, OP_HANGUP, 80, &block)).await;
+                        return "stopped".into();
+                    }
+                }
+                _ = keepalive.tick() => {
+                    let _ = socket.send(&packet(FAMILY_MONITOR, OP_KEEPALIVE, 80, &block)).await;
+                }
+                recv = socket.recv(&mut buf) => {
+                    let Ok(size) = recv else { return "recv_error".into() };
+                    for raw in split_coalesced(&buf[..size]) {
+                        let Ok(msg) = Message::parse(raw) else { continue };
+                        if msg.family != FAMILY_MONITOR { continue; }
+                        if msg.opcode == OP_HANGUP {
+                            return "door_hangup".into();
+                        }
+                        if msg.opcode == OP_MEDIA {
+                            let Some(media) = msg.media() else { continue };
+                            let pts_us = self.started.elapsed().as_micros() as u64;
+                            if media.media_type == MEDIA_AUDIO {
+                                self.push_audio(AudioChunk { pts_us, pcm: Arc::from(media.data) });
+                            } else if let Some(frame) = jpeg.push(&media) {
+                                self.push_video(VideoFrame { pts_us, jpeg: Arc::from(frame.as_slice()) });
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     pub fn mode(&self) -> AgentMode {
@@ -557,6 +759,36 @@ impl AgentControl for Agent {
         let result = self.execute(action, command_id);
         async move { result }.boxed()
     }
+
+    fn cameras(&self) -> BoxFuture<'_, Vec<crate::agent_api::CameraInfo>> {
+        Box::pin(async move { self.list_cameras().await })
+    }
+
+    fn call_elevator(&self, command_id: &str) -> BoxFuture<'_, CommandResult> {
+        let command_id = command_id.to_owned();
+        Box::pin(async move { self.call_elevator_now(&command_id).await })
+    }
+
+    fn start_monitor(&self, camera_id: &str) -> BoxFuture<'_, Result<(), CallError>> {
+        let camera_id = camera_id.to_owned();
+        let this = self.me.upgrade();
+        Box::pin(async move {
+            match this {
+                Some(agent) => agent.start_monitor_now(&camera_id).await,
+                None => Err(CallError::AgentOffline),
+            }
+        })
+    }
+
+    fn stop_monitor(&self) -> BoxFuture<'_, Result<(), CallError>> {
+        let stopped = self.stop_monitor_now();
+        Box::pin(async move {
+            match stopped {
+                Some(_) => Ok(()),
+                None => Err(CallError::NoCall),
+            }
+        })
+    }
 }
 
 impl AgentMedia for Agent {
@@ -642,6 +874,8 @@ pub struct Run {
     pub history: Duration,
     pub history_max_bytes: usize,
     pub discover_timeout: Duration,
+    pub roster: Vec<String>,
+    pub broadcast: Ipv4Addr,
 }
 
 /// Parse one MAC from `/proc/net/arp` text for `ip` (complete entries only).
@@ -722,6 +956,9 @@ pub async fn run_agent(run: Run) -> Result<()> {
                 run.policy,
                 run.history,
                 run.history_max_bytes,
+                run.roster.clone(),
+                run.broadcast,
+                run.discover_timeout,
             );
             tokio::spawn(wire.clone().run(agent.clone()));
             tokio::spawn(crate::wire_udp::discovery_responder(ic.discovery_port, ic.device_id.clone()));
@@ -757,6 +994,9 @@ pub async fn run_agent(run: Run) -> Result<()> {
                     run.policy,
                     run.history,
                     run.history_max_bytes,
+                    run.roster.clone(),
+                    run.broadcast,
+                    run.discover_timeout,
                 );
                 let capture = agent.clone();
                 tokio::task::spawn_blocking(move || {
