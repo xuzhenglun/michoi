@@ -160,6 +160,18 @@
       <button class="mini" id="camBtn" hidden>开摄像头</button>
       <button class="mini" id="dialHangupBtn" hidden>挂断</button>
     </div>
+    <div class="row" id="camParams" hidden>
+      <select id="camRes" title="分辨率">
+        <option value="320x240">320×240</option>
+        <option value="640x480" selected>640×480</option>
+        <option value="1280x720">1280×720</option>
+      </select>
+      <select id="camFps" title="帧率">
+        <option value="12" selected>12 fps</option>
+        <option value="24">24 fps</option>
+        <option value="48">48 fps</option>
+      </select>
+    </div>
   </section>
 
   <section class="log" id="log"></section>
@@ -189,6 +201,7 @@
     log: $('log'), toast: $('toast'), settings: $('settings'), tokenInput: $('tokenInput'), soundWave: $('soundWave'),
     elevator: $('elevatorBtn'), cameraSelect: $('cameraSelect'), view: $('viewBtn'), viewStop: $('viewStopBtn'),
     dialInput: $('dialInput'), dial: $('dialBtn'), cam: $('camBtn'), dialHangup: $('dialHangupBtn'),
+    camParams: $('camParams'), camRes: $('camRes'), camFps: $('camFps'),
   };
   const base = location.origin;
   const withToken = (path) => base + path + (state.token ? (path.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(state.token) : '');
@@ -223,14 +236,15 @@
     el.viewStop.hidden = !state.monitoring;
     el.cam.hidden = !state.calling;
     el.cam.textContent = camera ? '关摄像头' : '开摄像头';
+    el.camParams.hidden = !state.calling;
     el.dial.disabled = !(state.online && !state.calling && !state.monitoring && el.dialInput.value.trim() !== '');
     el.dialHangup.hidden = !state.calling;
     document.title = ringing ? '🔔 门口有人呼叫' : '门口机';
   }
 
   // ---------- Ringtone (Web Audio, no assets) ----------
-  let audioCtx = null, ringTimer = null, soundOn = localStorage.getItem('padSound') !== 'off';
-  function ctx() { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); if (audioCtx.state === 'suspended') audioCtx.resume(); return audioCtx; }
+  let audioCtx = null, audioGain = null, ringTimer = null, soundOn = localStorage.getItem('padSound') !== 'off';
+  function ctx() { if (!audioCtx) { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); audioGain = audioCtx.createGain(); audioGain.gain.value = soundOn ? 1 : 0; audioGain.connect(audioCtx.destination); } if (audioCtx.state === 'suspended') audioCtx.resume(); return audioCtx; }
   function beep(freq, at, dur) {
     const c = ctx(); const o = c.createOscillator(); const g = c.createGain();
     o.type = 'sine'; o.frequency.value = freq; g.gain.value = 0.0001;
@@ -243,7 +257,7 @@
     play(); ringTimer = setInterval(play, 1600);
   }
   function stopRing() { clearInterval(ringTimer); ringTimer = null; }
-  $('soundBtn').onclick = () => { soundOn = !soundOn; localStorage.setItem('padSound', soundOn ? 'on' : 'off'); el.soundWave.style.display = soundOn ? '' : 'none'; toast(soundOn ? '铃声已开启' : '铃声已关闭'); if (!soundOn) stopRing(); else ctx(); };
+  $('soundBtn').onclick = () => { soundOn = !soundOn; localStorage.setItem('padSound', soundOn ? 'on' : 'off'); el.soundWave.style.display = soundOn ? '' : 'none'; if (audioGain) audioGain.gain.value = soundOn ? 1 : 0; toast(soundOn ? '喇叭已开启' : '喇叭已静音'); if (!soundOn) stopRing(); else ctx(); };
   el.soundWave.style.display = soundOn ? '' : 'none';
   document.addEventListener('pointerdown', () => { if (soundOn) ctx(); }, { once: true });
 
@@ -253,7 +267,6 @@
   async function startMedia() {
     if (mediaLive) return; mediaLive = true;
     el.video.src = withToken('/v1/stream.mjpeg?t=' + Date.now());
-    if (!soundOn) return;
     audioAbort = new AbortController();
     try {
       const resp = await fetch(withToken('/v1/audio.pcm'), { headers: { 'Accept': 'audio/L16' }, signal: audioAbort.signal });
@@ -266,7 +279,7 @@
         const view = new DataView(bytes.buffer, bytes.byteOffset, usable); const n = usable / 2; if (!n) continue;
         const buf = c.createBuffer(1, n, 8000); const data = buf.getChannelData(0);
         for (let i = 0; i < n; i++) data[i] = view.getInt16(i * 2, false) / 32768;
-        const src = c.createBufferSource(); src.buffer = buf; src.connect(c.destination);
+        const src = c.createBufferSource(); src.buffer = buf; src.connect(audioGain || c.destination);
         playhead = Math.max(playhead, c.currentTime + 0.08); src.start(playhead); playhead += buf.duration;
       }
     } catch (e) { /* aborted or network */ }
@@ -373,41 +386,56 @@
   // ---------- Outbound call (dial) ----------
   // Send our camera to the far end during a call (browser -> JPEG -> Agent).
   let camera = null;
+  function camGeom() { const [w, h] = el.camRes.value.split('x').map(Number); return { w, h, fps: Number(el.camFps.value) }; }
   async function startCamera() {
     if (camera) return;
     if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       toast('需要安全环境（https 或 http://localhost）才能用摄像头/麦克风。用 SSH 转发后访问 http://localhost:8080'); return;
     }
+    const g = camGeom();
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: g.w }, height: { ideal: g.h } } });
       const video = document.createElement('video'); video.srcObject = stream; video.muted = true; await video.play();
-      const canvas = document.createElement('canvas'); canvas.width = 640; canvas.height = 480;
+      const canvas = document.createElement('canvas'); canvas.width = g.w; canvas.height = g.h;
       const g2 = canvas.getContext('2d');
       const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/v1/talk-video.ws' + (state.token ? '?token=' + encodeURIComponent(state.token) : ''));
       ws.binaryType = 'arraybuffer';
-      camera = { stream, video, canvas, ws, timer: null, busy: false };
-      ws.onopen = () => {
-        camera.timer = setInterval(() => {
-          if (!camera || camera.busy || ws.readyState !== 1) return;
+      camera = { stream, video, canvas, g2, ws, timer: null, busy: false, periodMs: 1000 / g.fps };
+      const tick = () => {
+        if (!camera) return;
+        if (!camera.busy && ws.readyState === 1) {
           camera.busy = true;
-          g2.drawImage(video, 0, 0, canvas.width, canvas.height);
-          canvas.toBlob((b) => {
+          camera.g2.drawImage(camera.video, 0, 0, camera.canvas.width, camera.canvas.height);
+          camera.canvas.toBlob((b) => {
             if (b && camera && ws.readyState === 1) b.arrayBuffer().then((buf) => { try { ws.send(buf); } catch (e) {} camera.busy = false; });
             else if (camera) camera.busy = false;
           }, 'image/jpeg', 0.5);
-        }, 80);
+        }
+        if (camera) camera.timer = setTimeout(tick, camera.periodMs);
       };
+      ws.onopen = () => { tick(); };
       ws.onclose = () => stopCamera();
-      logLine('已开启本机摄像头');
+      logLine('已开启本机摄像头 ' + g.w + '×' + g.h + ' @' + g.fps + 'fps');
     } catch (e) { toast('无法打开摄像头：' + (e && e.name || e)); }
   }
   function stopCamera() {
     if (!camera) return;
-    clearInterval(camera.timer);
+    clearTimeout(camera.timer);
     try { camera.ws.close(); } catch (e) {}
     try { camera.stream.getTracks().forEach((t) => t.stop()); } catch (e) {}
     camera = null;
   }
+  // Live tuning during a call: FPS is free; resolution re-sizes the encode
+  // canvas (and best-effort re-requests the source) without restarting video.
+  el.camFps.onchange = () => { if (camera) { camera.periodMs = 1000 / Number(el.camFps.value); logLine('帧率 → ' + el.camFps.value + 'fps'); } };
+  el.camRes.onchange = () => {
+    const [w, h] = el.camRes.value.split('x').map(Number);
+    if (!camera) return;
+    camera.canvas.width = w; camera.canvas.height = h;
+    const track = camera.stream.getVideoTracks()[0];
+    if (track) track.applyConstraints({ width: { ideal: w }, height: { ideal: h } }).catch(() => {});
+    logLine('分辨率 → ' + w + '×' + h);
+  };
   el.dialInput.oninput = render;
   // Dialing is room-to-room only (S). Compose the full station id from a short
   // number using our own id's pattern (S00000000000 + "3003" -> S00000030030);
